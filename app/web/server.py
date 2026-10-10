@@ -106,7 +106,10 @@ class TaskManager:
         running = th is not None and th.is_alive()
         events = self.events.replay(task_id)
         types = {t for _s, t, _p in events}
-        done = sum(1 for _s, t, _p in events if t == "subtask.finished")
+        # 子任务的三种终态事件都算“已完成”（正常完成 / 步数上限收尾 / 解析失败中止）；
+        # subtask.paused 不算（未完成，可恢复）
+        done = sum(1 for _s, t, _p in events
+                   if t in ("subtask.finished", "subtask.max_steps", "subtask.aborted"))
         total: int | None = None
         for _s, t, payload in events:
             if t == "plan.created":

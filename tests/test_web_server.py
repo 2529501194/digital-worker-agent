@@ -105,6 +105,40 @@ class _SlowMock:
         return text
 
 
+class _LoopingLLM:
+    """EXECUTE 阶段永远只调 web_search → 每个子任务都以 max_steps 收尾（无 subtask.finished）。"""
+
+    name = "looping"
+
+    def __init__(self):
+        self.last_meta = None
+
+    def complete(self, system, user):
+        if "STAGE: PLAN" in user:
+            import json as _json
+            return _json.dumps({"subtasks": [{"title": "A 调研", "focus": "a"}]},
+                               ensure_ascii=False)
+        if "STAGE: WRITE" in user:
+            return "# 研究报告\n\n内容"
+        return '{"action": "web_search", "args": {"query": "a"}}'
+
+
+def test_max_steps_subtask_counts_as_done(tmp_path):
+    """子任务以 subtask.max_steps 收尾（无 subtask.finished）时，进度也要计入已完成。"""
+    server, mgr, base = _start(tmp_path, llm=_LoopingLLM())
+    try:
+        code, body = _req(base, "POST", "/api/tasks",
+                          {"prompt": "p", "task_id": "t-loop", "limit_subtasks": 1})
+        assert code == 202
+        assert _wait_done(base, "t-loop") == "done"
+        code, body = _req(base, "GET", "/api/tasks")
+        t = next(x for x in json.loads(body)["tasks"] if x["task_id"] == "t-loop")
+        assert t["subtasks_done"] == 1 and t["subtasks_total"] == 1, t
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
 def test_task_running_conflict(tmp_path):
     server, mgr, base = _start(tmp_path, llm=_SlowMock())
     try:

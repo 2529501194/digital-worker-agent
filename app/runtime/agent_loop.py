@@ -32,7 +32,7 @@ class SubtaskResult:
 
 class AgentLoop:
     def __init__(self, llm: ModelProvider, tools: ToolRouter, events: EventStore,
-                 budget: Budget, max_steps: int = 8, max_parse_retries: int = 2):
+                 budget: Budget, max_steps: int = 12, max_parse_retries: int = 2):
         self.llm = llm
         self.tools = tools
         self.events = events
