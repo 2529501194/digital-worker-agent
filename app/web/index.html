@@ -115,6 +115,8 @@ const $ = (s) => document.querySelector(s);
 let current = null;          // 当前选中任务 id
 let since = 0;              // 事件增量拉取游标
 let pollTimer = null;
+let pollGen = 0;           // 轮询代数：切换任务/恢复时自增，用于丢弃过期响应
+const lastStatus = {};     // 上次观察到的任务状态（仅“运行中→完成”过渡时自动切报告页）
 
 // ---- 迷你 Markdown 渲染（仅报告需要的基础子集）----
 function esc(s) { return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
@@ -177,6 +179,7 @@ async function refreshTasks() {
 
 function updateDetailHead(tid) {
   api("/api/tasks").then((r) => {
+    if (tid !== current) return;  // 响应期间已切换任务 → 丢弃
     const t = r.body.tasks.find(x => x.task_id === tid);
     if (!t) return;
     $("#ph").style.display = "none";
@@ -186,12 +189,18 @@ function updateDetailHead(tid) {
       <span class="st ${t.status}">${t.status}</span>
       ${t.subtasks_total != null ? `<span class="prog" style="font:12px var(--mono);color:var(--muted)">子任务 ${t.subtasks_done}/${t.subtasks_total}</span>` : ""}`;
     $("#btn-resume").style.display = t.resumable ? "" : "none";
-    if (t.status === "done" && t.has_report && $("#tabs .tab.on").dataset.tab !== "report") switchTab("report");
+    // 仅在“运行中 → 完成”的过渡时自动切报告页；
+    // 选中一个已完成任务时停留在时间线页，不再被强制切走
+    const prev = lastStatus[tid];
+    lastStatus[tid] = t.status;
+    if (prev === "running" && t.status === "done" && t.has_report
+        && $("#tabs .tab.on").dataset.tab !== "report") switchTab("report");
   });
 }
 
 function selectTask(tid) {
-  current = tid; since = 0;
+  current = tid; since = 0; pollGen++;  // 代数+1：旧任务的在途轮询响应全部失效
+  delete lastStatus[tid];
   $("#events").innerHTML = "";
   $("#report").innerHTML = "";
   $("#ph").style.display = "none"; $("#tabs").style.display = "flex";
@@ -222,7 +231,9 @@ function evText(seq, type, p) {
 
 async function pollEvents() {
   if (!current) return;
-  const r = await api(`/api/tasks/${encodeURIComponent(current)}/timeline?since=${since}`);
+  const task = current, gen = pollGen;  // 快照：请求发出时的任务与代数
+  const r = await api(`/api/tasks/${encodeURIComponent(task)}/timeline?since=${since}`);
+  if (gen !== pollGen || current !== task) return;  // 已切换任务 → 丢弃过期响应，不污染 since
   if (r.ok) {
     for (const [seq, type, p] of r.body.events) {
       since = Math.max(since, seq);
@@ -259,7 +270,7 @@ $("#btn-resume").onclick = async () => {
   if (!current) return;
   const r = await api(`/api/tasks/${encodeURIComponent(current)}/resume`,
                       { method: "POST", headers: {"Content-Type":"application/json"}, body: "{}" });
-  if (r.ok) { since = 0; $("#events").innerHTML = ""; switchTab("timeline"); pollEvents(); }
+  if (r.ok) { pollGen++; since = 0; $("#events").innerHTML = ""; switchTab("timeline"); pollEvents(); }
   else alert("恢复失败：" + (r.body.error || r.code));
 };
 $("#btn-run").onclick = async () => {
