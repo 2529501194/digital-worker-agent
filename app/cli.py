@@ -24,10 +24,7 @@ from .runtime.budget import Budget
 from .runtime.events import EventStore
 from .runtime.orchestrator import Orchestrator
 from .tools.artifact_store import ArtifactStore
-from .tools.registry import ToolRouter
-
-RESEARCHER_WHITELIST = ["web_search", "web_fetch", "write_artifact",
-                        "read_artifact", "list_artifacts"]
+from .tools.registry import RESEARCHER_WHITELIST, ToolRouter
 
 # Windows 控制台默认 GBK，强制 UTF-8 输出避免中文乱码
 if sys.platform == "win" and sys.stdout is not None:
@@ -115,6 +112,18 @@ def cmd_timeline(a: argparse.Namespace) -> None:
         print(f"  #{seq:<3} {type_:<20}{extra}")
 
 
+def cmd_serve(a: argparse.Namespace) -> None:
+    from .web.server import create_server
+    server, _ = create_server(a.storage, host=a.host, port=a.port, verbose=True)
+    print(f"[web] http://{a.host}:{server.server_address[1]}  （Ctrl+C 停止）")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("[web] stopped")
+    finally:
+        server.server_close()
+
+
 def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(prog="research-employee")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -136,6 +145,12 @@ def main(argv: list[str] | None = None) -> None:
     pr.add_argument("--task-id", required=True)
     pr.add_argument("--storage", default="storage")
     pr.set_defaults(fn=cmd_timeline)
+
+    pr = sub.add_parser("serve", help="启动 Web 前端（http://127.0.0.1:8000）")
+    pr.add_argument("--storage", default="storage")
+    pr.add_argument("--host", default="127.0.0.1")
+    pr.add_argument("--port", type=int, default=8000)
+    pr.set_defaults(fn=cmd_serve)
 
     a = p.parse_args(argv)
     a.fn(a)

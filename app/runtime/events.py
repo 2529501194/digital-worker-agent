@@ -68,16 +68,24 @@ class EventStore:
             return seq
 
     def replay(self, task_id: str, since_seq: int = 0) -> list[tuple[int, str, dict]]:
-        rows = self.conn.execute(
-            "SELECT seq, type, payload FROM event WHERE task_id = ? AND seq > ? ORDER BY seq",
-            (task_id, since_seq),
-        ).fetchall()
+        with self.lock:  # 读也加锁：多线程 Web 服务下与写入共享同一连接
+            rows = self.conn.execute(
+                "SELECT seq, type, payload FROM event WHERE task_id = ? AND seq > ? ORDER BY seq",
+                (task_id, since_seq),
+            ).fetchall()
         return [(seq, t, json.loads(p)) for seq, t, p in rows]
 
     def latest_seq(self, task_id: str) -> int:
-        return self.conn.execute(
-            "SELECT COALESCE(MAX(seq), 0) FROM event WHERE task_id = ?", (task_id,)
-        ).fetchone()[0]
+        with self.lock:
+            return self.conn.execute(
+                "SELECT COALESCE(MAX(seq), 0) FROM event WHERE task_id = ?", (task_id,)
+            ).fetchone()[0]
+
+    def list_task_ids(self) -> list[str]:
+        with self.lock:
+            rows = self.conn.execute(
+                "SELECT task_id FROM event GROUP BY task_id ORDER BY MIN(seq)").fetchall()
+        return [r[0] for r in rows]
 
     # ---- 检查点 ----
     def save_checkpoint(
@@ -108,10 +116,11 @@ class EventStore:
         )
 
     def load_checkpoint(self, task_id: str) -> Checkpoint | None:
-        row = self.conn.execute(
-            "SELECT stage, subtask_cursor, plan_version, payload FROM checkpoint WHERE task_id = ?",
-            (task_id,),
-        ).fetchone()
+        with self.lock:
+            row = self.conn.execute(
+                "SELECT stage, subtask_cursor, plan_version, payload FROM checkpoint WHERE task_id = ?",
+                (task_id,),
+            ).fetchone()
         if row is None:
             return None
         return Checkpoint(

@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>研究数字员工</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --line: #e3e6ea; --text: #1c2430;
+    --muted: #6b7686; --accent: #2456d6; --mono: "Cascadia Code", Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.6 system-ui, "Segoe UI", "Microsoft YaHei", sans-serif;
+         background: var(--bg); color: var(--text); }
+  header { display: flex; align-items: center; gap: 12px; padding: 12px 20px;
+           background: var(--panel); border-bottom: 1px solid var(--line); }
+  header h1 { font-size: 16px; margin: 0; }
+  .badge { font: 11px var(--mono); background: #eef2fb; color: var(--accent);
+           border-radius: 10px; padding: 2px 10px; }
+  .badge.w { background: #f0f7ee; color: #2c7a3f; }
+  main { display: grid; grid-template-columns: 340px 1fr; gap: 16px; padding: 16px 20px; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+           padding: 14px 16px; }
+  .panel h2 { font-size: 13px; color: var(--muted); margin: 0 0 8px;
+              text-transform: uppercase; letter-spacing: .05em; }
+  textarea, input, button { font: inherit; }
+  textarea { width: 100%; min-height: 64px; resize: vertical; border: 1px solid var(--line);
+             border-radius: 6px; padding: 8px; }
+  .row { display: flex; gap: 8px; margin-top: 8px; align-items: center; }
+  input[type=number] { width: 64px; border: 1px solid var(--line); border-radius: 6px; padding: 5px; }
+  input[type=text] { flex: 1; border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px; }
+  button { border: 1px solid var(--accent); background: var(--accent); color: #fff;
+           border-radius: 6px; padding: 6px 14px; cursor: pointer; }
+  button.ghost { background: transparent; color: var(--accent); }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  .task { padding: 8px 10px; border-radius: 6px; cursor: pointer; display: flex;
+          justify-content: space-between; gap: 8px; align-items: center; }
+  .task:hover { background: #f0f3f8; }
+  .task.sel { background: #e8eefb; }
+  .task .id { font: 12px var(--mono); }
+  .task .prog { font: 11px var(--mono); color: var(--muted); }
+  .st { font: 11px var(--mono); border-radius: 9px; padding: 1px 8px; white-space: nowrap; }
+  .st.running { background: #e3ecff; color: #2456d6; animation: pulse 1.2s infinite; }
+  .st.done { background: #e0f2e4; color: #2c7a3f; }
+  .st.paused, .st.interrupted { background: #fff3e0; color: #b26a00; }
+  .st.failed { background: #fde8e8; color: #c0392b; }
+  .st.unknown { background: #eee; color: #666; }
+  @keyframes pulse { 50% { opacity: .5; } }
+  .tabs { display: flex; gap: 4px; margin: 10px 0; }
+  .tab { padding: 5px 14px; border-radius: 6px; cursor: pointer; color: var(--muted); }
+  .tab.on { background: #e8eefb; color: var(--accent); font-weight: 600; }
+  #detail-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  #detail-head .id { font: 14px var(--mono); font-weight: 600; }
+  #events { font: 12px var(--mono); max-height: 480px; overflow: auto; }
+  .ev { padding: 3px 6px; border-left: 3px solid transparent; white-space: nowrap;
+        overflow: hidden; text-overflow: ellipsis; }
+  .ev:hover { white-space: normal; }
+  .ev .n { color: var(--muted); display: inline-block; width: 44px; }
+  .ev.llm.called { border-color: #2456d6; }
+  .ev.tool.called { border-color: #2c7a3f; }
+  .ev.tool.called.err { border-color: #c0392b; }
+  .ev.task.completed, .ev.plan.created, .ev.report.generated { border-color: #b26a00; background: #fffaf0; }
+  .ev.task.paused, .ev.task.failed, .ev.task.resumed, .ev.checkpoint.saved { border-color: #999; }
+  #report { max-height: 560px; overflow: auto; padding: 4px 8px; }
+  #report h1 { font-size: 20px; border-bottom: 1px solid var(--line); padding-bottom: 6px; }
+  #report h2 { font-size: 17px; margin-top: 18px; }
+  #report h3 { font-size: 15px; }
+  #report code { background: #f0f2f5; border-radius: 3px; padding: 1px 4px; font: 12px var(--mono); }
+  #report a { color: var(--accent); }
+  #report ul { padding-left: 22px; }
+  #report blockquote { border-left: 3px solid var(--line); margin: 8px 0; padding: 2px 12px; color: var(--muted); }
+  .empty { color: var(--muted); text-align: center; padding: 40px 0; }
+  .hint { font-size: 12px; color: var(--muted); margin-top: 6px; }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>研究数字员工</h1>
+  <span class="badge" id="b-llm">LLM: …</span>
+  <span class="badge w" id="b-web">Web: …</span>
+</header>
+<main>
+  <div>
+    <div class="panel">
+      <h2>新建研究任务</h2>
+      <textarea id="prompt" placeholder="例：调研主流 Coding Agent 的任务规划 / 工具使用 / 上下文管理差异"></textarea>
+      <div class="row">
+        <input type="number" id="limit" value="3" min="1" max="10" title="子任务上限">
+        <input type="text" id="tid" placeholder="task-id（可留空自动生成）">
+        <button id="btn-run">开始</button>
+      </div>
+      <div class="hint">子任务上限控制任务时长与成本；默认 3。</div>
+    </div>
+    <div class="panel" style="margin-top:14px">
+      <h2>任务</h2>
+      <div id="task-list"><div class="empty">暂无任务</div></div>
+    </div>
+  </div>
+  <div class="panel">
+    <div id="detail-head"><span class="empty" id="ph">← 选择一个任务查看详情</span></div>
+    <div class="tabs" id="tabs" style="display:none">
+      <div class="tab on" data-tab="timeline">事件时间线</div>
+      <div class="tab" data-tab="report">研究报告</div>
+      <span style="flex:1"></span>
+      <button class="ghost" id="btn-resume" style="display:none">恢复运行</button>
+    </div>
+    <div id="view-timeline"><div id="events"></div></div>
+    <div id="view-report" style="display:none"><div id="report"></div></div>
+  </div>
+</main>
+<script>
+"use strict";
+const $ = (s) => document.querySelector(s);
+let current = null;          // 当前选中任务 id
+let since = 0;              // 事件增量拉取游标
+let pollTimer = null;
+
+// ---- 迷你 Markdown 渲染（仅报告需要的基础子集）----
+function esc(s) { return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
+function md(src) {
+  const inline = (s) => esc(s)
+    .replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>')
+    .replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>")
+    .replace(/`([^`]+)`/g, "<code>$1</code>");
+  const out = []; let inList = false, inQuote = false;
+  for (const raw of src.split(/\r?\n/)) {
+    const line = raw.trimEnd();
+    const closeList = () => { if (inList) { out.push("</ul>"); inList = false; } };
+    const closeQuote = () => { if (inQuote) { out.push("</blockquote>"); inQuote = false; } };
+    if (!line.trim()) { closeList(); closeQuote(); continue; }
+    let m;
+    if (m = line.match(/^(#{1,4})\s+(.*)/)) { closeList(); closeQuote();
+      out.push(`<h${m[1].length}>${inline(m[2])}</h${m[1].length}>`); continue; }
+    if (m = line.match(/^[-*]\s+(.*)/)) { closeQuote(); if (!inList) { out.push("<ul>"); inList = true; }
+      out.push(`<li>${inline(m[1])}</li>`); continue; }
+    if (m = line.match(/^>\s?(.*)/)) { closeList(); if (!inQuote) { out.push("<blockquote>"); inQuote = true; }
+      out.push(inline(m[1])); continue; }
+    closeList(); closeQuote();
+    out.push(`<p>${inline(line)}</p>`);
+  }
+  closeList(); closeQuote();
+  return out.join("\n");
+}
+
+// ---- API ----
+async function api(path, opt) {
+  const r = await fetch(path, opt);
+  const ct = r.headers.get("content-type") || "";
+  return { ok: r.ok, code: r.status, body: ct.includes("json") ? await r.json() : await r.text() };
+}
+
+async function loadStatus() {
+  const r = await api("/api/status");
+  if (r.ok) {
+    $("#b-llm").textContent = "LLM: " + r.body.llm;
+    $("#b-web").textContent = "Web: " + r.body.web;
+  }
+}
+
+async function refreshTasks() {
+  const r = await api("/api/tasks");
+  if (!r.ok) return;
+  const box = $("#task-list");
+  if (!r.body.tasks.length) { box.innerHTML = '<div class="empty">暂无任务</div>'; return; }
+  box.innerHTML = "";
+  for (const t of r.body.tasks) {
+    const d = document.createElement("div");
+    d.className = "task" + (t.task_id === current ? " sel" : "");
+    const prog = t.subtasks_total != null ? ` ${t.subtasks_done}/${t.subtasks_total}` : "";
+    d.innerHTML = `<span class="id">${t.task_id}</span><span class="prog">${t.status}${prog}</span><span class="st ${t.status}">${t.status}</span>`;
+    d.onclick = () => selectTask(t.task_id);
+    box.appendChild(d);
+  }
+  if (current) updateDetailHead(current);
+}
+
+function updateDetailHead(tid) {
+  api("/api/tasks").then((r) => {
+    const t = r.body.tasks.find(x => x.task_id === tid);
+    if (!t) return;
+    $("#ph").style.display = "none";
+    $("#tabs").style.display = "flex";
+    const head = $("#detail-head");
+    head.innerHTML = `<span class="id">${t.task_id}</span>
+      <span class="st ${t.status}">${t.status}</span>
+      ${t.subtasks_total != null ? `<span class="prog" style="font:12px var(--mono);color:var(--muted)">子任务 ${t.subtasks_done}/${t.subtasks_total}</span>` : ""}`;
+    $("#btn-resume").style.display = t.resumable ? "" : "none";
+    if (t.status === "done" && t.has_report && $("#tabs .tab.on").dataset.tab !== "report") switchTab("report");
+  });
+}
+
+function selectTask(tid) {
+  current = tid; since = 0;
+  $("#events").innerHTML = "";
+  $("#report").innerHTML = "";
+  $("#ph").style.display = "none"; $("#tabs").style.display = "flex";
+  switchTab("timeline");
+  refreshTasks();
+  pollEvents();
+}
+
+function switchTab(name) {
+  for (const t of $("#tabs").querySelectorAll(".tab"))
+    t.classList.toggle("on", t.dataset.tab === name);
+  $("#view-timeline").style.display = name === "timeline" ? "" : "none";
+  $("#view-report").style.display = name === "report" ? "" : "none";
+  if (name === "report" && current) loadReport();
+}
+
+function evText(seq, type, p) {
+  let extra = "";
+  if (type === "llm.called")
+    extra = ` ${p.provider||""} ${p.tokens_in||0}+${p.tokens_out||0}tok ${p.latency_ms||0}ms${p.retries?` retry=${p.retries}`:""}`;
+  else if (type === "tool.called") {
+    extra = ` ${p.tool||""} ${p.ok ? "ok" : "ERR"}`;
+    if (p.error) extra += ` ${p.error.slice(0,80)}`;
+  } else if (p && Object.keys(p).length)
+    extra = " " + JSON.stringify(p).slice(0, 140);
+  return extra;
+}
+
+async function pollEvents() {
+  if (!current) return;
+  const r = await api(`/api/tasks/${encodeURIComponent(current)}/timeline?since=${since}`);
+  if (r.ok) {
+    for (const [seq, type, p] of r.body.events) {
+      since = Math.max(since, seq);
+      const d = document.createElement("div");
+      const isErr = type === "tool.called" && p && !p.ok;
+      d.className = "ev " + type + (isErr ? " err" : "");
+      d.innerHTML = `<span class="n">#${seq}</span>${type}${esc(evText(seq, type, p))}`;
+      $("#events").appendChild(d);
+    }
+    $("#events").scrollTop = $("#events").scrollHeight;
+    const status = r.body.status;
+    updateDetailHead(current);
+    if (status === "running") pollTimer = setTimeout(pollEvents, 1500);
+    return; // 终态 → 停止轮询
+  }
+  pollTimer = setTimeout(pollEvents, 3000);
+}
+
+async function loadReport() {
+  if (!current) return;
+  const r = await api(`/api/tasks/${encodeURIComponent(current)}/report`);
+  $("#report").innerHTML = r.ok ? md(r.body) : '<div class="empty">报告尚未生成</div>';
+}
+
+// ---- 事件绑定 ----
+$("#tabs").addEventListener("click", (e) => {
+  if (e.target.dataset.tab) switchTab(e.target.dataset.tab);
+});
+$("#btn-resume").onclick = async () => {
+  if (!current) return;
+  const r = await api(`/api/tasks/${encodeURIComponent(current)}/resume`,
+                      { method: "POST", headers: {"Content-Type":"application/json"}, body: "{}" });
+  if (r.ok) { since = 0; $("#events").innerHTML = ""; switchTab("timeline"); pollEvents(); }
+  else alert("恢复失败：" + (r.body.error || r.code));
+};
+$("#btn-run").onclick = async () => {
+  const prompt = $("#prompt").value.trim();
+  if (!prompt) { alert("请填写研究主题"); return; }
+  const body = { prompt, limit_subtasks: +$("#limit").value || 3 };
+  const tid = $("#tid").value.trim();
+  if (tid) body.task_id = tid;
+  const r = await api("/api/tasks", { method: "POST", headers: {"Content-Type":"application/json"},
+                                      body: JSON.stringify(body) });
+  if (r.ok) {
+    const id = r.body.task_id;
+    $("#prompt").value = ""; $("#tid").value = "";
+    selectTask(id);
+  } else alert("提交失败：" + (r.body.error || r.code));
+};
+
+loadStatus();
+refreshTasks();
+setInterval(refreshTasks, 4000);
+</script>
+</body>
+</html>

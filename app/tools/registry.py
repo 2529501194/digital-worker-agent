@@ -12,6 +12,10 @@ from .web import MockWebBackend, ToolResult
 
 MAX_RESULT_CHARS = 2000  # 防单次工具结果灌爆上下文
 
+# 研究员岗位白名单（角色配置；CLI 与 Web 服务共用）
+RESEARCHER_WHITELIST = ["web_search", "web_fetch", "write_artifact",
+                       "read_artifact", "list_artifacts"]
+
 
 def _truncate(s: str, n: int = MAX_RESULT_CHARS) -> str:
     return s if len(s) <= n else s[:n] + f"\n...[截断，共 {len(s)} 字符]"

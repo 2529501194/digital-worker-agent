@@ -93,6 +93,8 @@ PAGES: dict[str, dict[str, str]] = {
 class MockWebBackend:
     """确定性搜索/抓取后端（M1）。委托 MockSearchProvider + 内存缓存。"""
 
+    name = "mock"
+
     def __init__(self, pages: dict[str, dict[str, str]] | None = None):
         self.pages = pages if pages is not None else PAGES
         self._search = MockSearchProvider(self.pages)
