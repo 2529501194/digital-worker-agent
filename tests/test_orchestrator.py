@@ -85,6 +85,74 @@ def test_budget_exhaustion_produces_partial_report(tmp_path):
     assert cp.stage == "EXECUTE" and 0 < cp.subtask_cursor < 4
 
 
+def _dim_llm(plan_json: str, write_report: str = "# 研究报告\n\n内容"):
+    class DimLLM:
+        name = "dim"
+
+        def complete(self, system, user):
+            if "STAGE: PLAN" in user:
+                return plan_json
+            if "STAGE: WRITE" in user:
+                return write_report
+            return json.dumps({"action": "finish_subtask", "args": {"summary": "ok"}})
+    return DimLLM()
+
+
+def test_compare_dimensions_topic_driven(tmp_path):
+    """PLAN 产出主题专属对比维度 → 写入事件/工件 → 注入 WRITE 提示词。"""
+    plan = json.dumps({
+        "subtasks": [{"title": "iPhone 14 调研", "focus": "iphone 14 market share"}],
+        "compare_dimensions": ["市场份额", "价格带", "目标人群"]}, ensure_ascii=False)
+    storage = tmp_path / "storage"
+    events = EventStore(storage / "events.db")
+    artifacts = ArtifactStore(storage / "artifacts")
+    llm = _dim_llm(plan)
+    # 捕获 WRITE 阶段提示词
+    captured = {}
+    orig = llm.complete
+    def spy(system, user):
+        if "STAGE: WRITE" in user:
+            captured["write"] = system
+        return orig(system, user)
+    llm.complete = spy
+
+    orch = Orchestrator("t-dim", "当前手机市场分析", llm,
+                        ToolRouter(MockWebBackend(), artifacts), events,
+                        artifacts, Budget(), storage / "reports", plan_limit=1)
+    outcome = orch.run()
+    assert outcome.status == "done"
+
+    # 事件与工件都带维度
+    plan_ev = next(p for _s, t, p in events.replay("t-dim") if t == "plan.created")
+    assert plan_ev["compare_dimensions"] == ["市场份额", "价格带", "目标人群"]
+    plan_art = artifacts.full("t-dim", type_="plan")[0]["content"]
+    assert "市场份额" in plan_art
+    # WRITE 提示词用了主题维度，且不再写死 Coding Agent 三维度
+    assert "市场份额、价格带、目标人群" in captured["write"]
+    assert "任务规划 / 工具使用 / 上下文管理" not in captured["write"]
+
+
+def test_compare_dimensions_missing_falls_back(tmp_path):
+    """旧计划/模型未输出维度 → WRITE 提示词用兑底文案，不报错。"""
+    plan = json.dumps({"subtasks": [{"title": "A 调研", "focus": "a"}]}, ensure_ascii=False)
+    storage = tmp_path / "storage"
+    events = EventStore(storage / "events.db")
+    artifacts = ArtifactStore(storage / "artifacts")
+    llm = _dim_llm(plan)
+    captured = {}
+    orig = llm.complete
+    def spy(system, user):
+        if "STAGE: WRITE" in user:
+            captured["write"] = system
+        return orig(system, user)
+    llm.complete = spy
+    orch = Orchestrator("t-dim2", "某主题", llm,
+                        ToolRouter(MockWebBackend(), artifacts), events,
+                        artifacts, Budget(), storage / "reports", plan_limit=1)
+    assert orch.run().status == "done"
+    assert "自行选择最贴合研究主题" in captured["write"]
+
+
 def test_plan_json_with_markdown_fences(tmp_path):
     """真实模型常把 JSON 包在 ```json 围栏里 —— PLAN 提取必须健壮。"""
     import json

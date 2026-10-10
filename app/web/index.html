@@ -124,10 +124,10 @@ function md(src) {
     .replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>")
     .replace(/`([^`]+)`/g, "<code>$1</code>");
   const out = []; let inList = false, inQuote = false;
+  const closeList = () => { if (inList) { out.push("</ul>"); inList = false; } };
+  const closeQuote = () => { if (inQuote) { out.push("</blockquote>"); inQuote = false; } };
   for (const raw of src.split(/\r?\n/)) {
     const line = raw.trimEnd();
-    const closeList = () => { if (inList) { out.push("</ul>"); inList = false; } };
-    const closeQuote = () => { if (inQuote) { out.push("</blockquote>"); inQuote = false; } };
     if (!line.trim()) { closeList(); closeQuote(); continue; }
     let m;
     if (m = line.match(/^(#{1,4})\s+(.*)/)) { closeList(); closeQuote();
@@ -235,7 +235,11 @@ async function pollEvents() {
     $("#events").scrollTop = $("#events").scrollHeight;
     const status = r.body.status;
     updateDetailHead(current);
-    if (status === "running") pollTimer = setTimeout(pollEvents, 1500);
+    if (status === "running") {
+      // 报告标签页开着且任务未完成时，刷新占位状态
+      if (current && $("#tabs .tab.on").dataset.tab === "report") loadReport();
+      pollTimer = setTimeout(pollEvents, 1500);
+    }
     return; // 终态 → 停止轮询
   }
   pollTimer = setTimeout(pollEvents, 3000);

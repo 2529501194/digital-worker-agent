@@ -64,7 +64,8 @@ class MockResearchLLM:
         limit_raw = _line(ctx, "PLAN_LIMIT")
         limit = int(limit_raw) if limit_raw else 0
         subtasks = PLAN_SUBTASKS[:limit] if limit else PLAN_SUBTASKS
-        raw = json.dumps({"subtasks": subtasks}, ensure_ascii=False)
+        raw = json.dumps({"subtasks": subtasks, "compare_dimensions": _COMPARE_DIMS},
+                         ensure_ascii=False)
         self._set_meta(raw)
         return raw
 
