@@ -150,26 +150,35 @@ def _make_handler(manager: TaskManager) -> type[BaseHTTPRequestHandler]:
             print(f"[web] {self.address_string()} {fmt % args}")
 
         # ---- 响应辅助 ----
-        def _send(self, code: int, body: bytes, content_type: str) -> None:
+        def _send(self, code: int, body: bytes, content_type: str,
+                  no_cache: bool = False) -> None:
             self.send_response(code)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(body)))
+            if no_cache:
+                # 前端单页无独立静态资源：禁用浏览器缓存，
+                # 避免升级 JS 后用户仍跑到启发式缓存里的旧版页面
+                self.send_header("Cache-Control", "no-store, must-revalidate")
+                self.send_header("Pragma", "no-cache")
             self.end_headers()
-            self.wfile.write(body)
+            if not getattr(self, "_head_only", False):
+                self.wfile.write(body)
 
         def _json(self, obj, code: int = 200) -> None:
             self._send(code, json.dumps(obj, ensure_ascii=False).encode("utf-8"),
                        "application/json; charset=utf-8")
 
-        def _text(self, text: str, content_type: str, code: int = 200) -> None:
-            self._send(code, text.encode("utf-8"), content_type)
+        def _text(self, text: str, content_type: str, code: int = 200,
+                  no_cache: bool = False) -> None:
+            self._send(code, text.encode("utf-8"), content_type, no_cache=no_cache)
 
         # ---- GET ----
         def do_GET(self) -> None:
             parts = urlsplit(self.path)
             path, qs = parts.path, parse_qs(parts.query)
             if path in ("/", "/index.html"):
-                self._text(manager.index_html, "text/html; charset=utf-8")
+                self._text(manager.index_html, "text/html; charset=utf-8",
+                          no_cache=True)
             elif path == "/api/status":
                 self._json({"llm": manager.llm_desc,
                             "web": getattr(manager.web, "name", type(manager.web).__name__),
@@ -190,6 +199,14 @@ def _make_handler(manager: TaskManager) -> type[BaseHTTPRequestHandler]:
                     self._text(text, "text/markdown; charset=utf-8")
             else:
                 self._json({"error": "not found"}, 404)
+
+        def do_HEAD(self) -> None:
+            # 与 GET 同路，不写正文（兼容浏览器/探活器的 HEAD 请求）
+            self._head_only = True
+            try:
+                self.do_GET()
+            finally:
+                self._head_only = False
 
         # ---- POST ----
         def do_POST(self) -> None:
