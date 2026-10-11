@@ -98,7 +98,10 @@
     </div>
   </div>
   <div class="panel">
-    <div id="detail-head"><span class="empty" id="ph">← 选择一个任务查看详情</span></div>
+    <div id="detail-head">
+      <span class="empty" id="ph">← 选择一个任务查看详情</span>
+      <span id="detail-meta"></span>
+    </div>
     <div class="tabs" id="tabs" style="display:none">
       <div class="tab on" data-tab="timeline">事件时间线</div>
       <div class="tab" data-tab="report">研究报告</div>
@@ -185,8 +188,9 @@ function updateDetailHead(tid) {
     if (!t) return;
     $("#ph").style.display = "none";
     $("#tabs").style.display = "flex";
-    const head = $("#detail-head");
-    head.innerHTML = `<span class="id">${t.task_id}</span>
+    // 只替换 #detail-meta 子容器；不能对 #detail-head 整体 innerHTML
+    // （#ph 嵌套在其中，会被销毁，导致下次 selectTask 取到 null 抛错）
+    $("#detail-meta").innerHTML = `<span class="id">${t.task_id}</span>
       <span class="st ${t.status}">${t.status}</span>
       ${t.subtasks_total != null ? `<span class="prog" style="font:12px var(--mono);color:var(--muted)">子任务 ${t.subtasks_done}/${t.subtasks_total}</span>` : ""}`;
     $("#btn-resume").style.display = t.resumable ? "" : "none";
