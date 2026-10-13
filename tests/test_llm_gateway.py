@@ -80,6 +80,51 @@ def test_timeout_retried_then_success():
     assert text == "hello" and meta.retries == 1
 
 
+class _TimeoutRecorder(FakeHTTP):
+    """额外记录每次尝试的读超时窗口（per-request timeout 参数）。"""
+
+    def __init__(self, script):
+        super().__init__(script)
+        self.timeouts = []
+
+    def post(self, url, json=None, headers=None, **kw):
+        self.timeouts.append(kw.get("timeout"))
+        return super().post(url, json=json, headers=headers, **kw)
+
+
+def _slow_provider(script, timeout=60.0, max_retries=3):
+    http = _TimeoutRecorder(script)
+    p = OpenAICompatibleProvider("p1", "https://fake/v1", "k", "m",
+                                 timeout=timeout, max_retries=max_retries,
+                                 backoff_base=0.0, http_client=http,
+                                 sleep_fn=lambda s: None)
+    return p, http
+
+
+def test_read_timeout_escalates_window_and_rescues_slow_call():
+    """慢模型场景：基础窗口（60s）内读超时 → 重试窗口翻倍（120s）救回。
+
+    生成不可续传，重试重发全量 prompt 从头生成——只有更长的窗口能
+    让“慢但能完成”的调用成功（GLM-5.x 单次 30-50s 的典型失败模式）。
+    """
+    p, http = _slow_provider([httpx.ReadTimeout("read t/o"), ok_response()])
+    text, meta = p.complete("s", "u")
+    assert text == "hello" and meta.retries == 1
+    assert http.timeouts == [60, 120]
+
+
+def test_read_timeout_exhausted_message_points_to_env():
+    """连续读超时 → 报错直接给出调参出口（RE_EMP_LLM_TIMEOUT），不再笼统“网络错误”。"""
+    p, http = _slow_provider([httpx.ReadTimeout("read t/o")] * 4)
+    with pytest.raises(LLMError) as ei:
+        p.complete("s", "u")
+    assert ei.value.retryable
+    assert "RE_EMP_LLM_TIMEOUT" in str(ei.value)
+    assert "读超时" in str(ei.value)
+    # 首次基础窗口，重试一律 2x（封顶）
+    assert http.timeouts == [60, 120, 120, 120]
+
+
 def test_non_retryable_401_immediate_error():
     p, http = make_provider([FakeResponse(401, text="unauthorized")], max_retries=3)
     with pytest.raises(LLMError) as ei:

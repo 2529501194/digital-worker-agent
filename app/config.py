@@ -4,7 +4,9 @@ LLM（OpenAI 兼容，可配主/备两级降级链）：
     RE_EMP_LLM_BASE_URL   默认 https://api.openai.com/v1
     RE_EMP_LLM_API_KEY
     RE_EMP_LLM_MODEL      默认 gpt-4o-mini
-    RE_EMP_LLM_TIMEOUT / RE_EMP_LLM_MAX_RETRIES
+    RE_EMP_LLM_TIMEOUT（默认 180s）/ RE_EMP_LLM_MAX_RETRIES
+        慢模型（GLM-5.x 等长生成，单次 30-50s）需留足读超时窗口，
+        否则 WRITE 阶段大上下文调用易超时 → GatewayError → task.failed
     RE_EMP_LLM_FALLBACK_BASE_URL / _API_KEY / _MODEL   （可选降级模型）
 
 Web：
@@ -39,7 +41,7 @@ class LLMProviderSpec:
     base_url: str
     api_key: str
     model: str
-    timeout: float = 60.0
+    timeout: float = 180.0
     max_retries: int = 3
 
 
@@ -76,7 +78,7 @@ class AppConfig:
                                        "https://api.openai.com/v1"),
                 api_key=primary_key,
                 model=os.environ.get("RE_EMP_LLM_MODEL", "gpt-4o-mini"),
-                timeout=float(os.environ.get("RE_EMP_LLM_TIMEOUT", "60")),
+                timeout=float(os.environ.get("RE_EMP_LLM_TIMEOUT", "180")),
                 max_retries=int(os.environ.get("RE_EMP_LLM_MAX_RETRIES", "3"))))
         fb_key = os.environ.get("RE_EMP_LLM_FALLBACK_API_KEY")
         if fb_key:

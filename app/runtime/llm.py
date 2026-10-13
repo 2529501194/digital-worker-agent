@@ -49,7 +49,7 @@ class OpenAICompatibleProvider:
     """任何 OpenAI 兼容端点（OpenAI / Azure / vLLM / Ollama / DeepSeek ...）。"""
 
     def __init__(self, name: str, base_url: str, api_key: str, model: str,
-                 timeout: float = 60.0, max_retries: int = 3,
+                 timeout: float = 180.0, max_retries: int = 3,
                  backoff_base: float = 0.5,
                  http_client: httpx.Client | None = None,
                  sleep_fn=time.sleep):
@@ -57,6 +57,7 @@ class OpenAICompatibleProvider:
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.model = model
+        self.timeout = timeout
         self.max_retries = max_retries
         self.backoff_base = backoff_base
         self._sleep = sleep_fn
@@ -79,8 +80,12 @@ class OpenAICompatibleProvider:
         for attempt in range(self.max_retries + 1):
             try:
                 t0 = time.monotonic()
+                # 读超时窗口：首次用基础值；读超时后的重试翻倍（上限 2x）。
+                # 慢模型（如 GLM-5.x 长生成 30-50s/次）在基础窗口内会超时，
+                # 而生成不可续传——重试只能靠更长的窗口救回来。
                 resp = self._http.post(
-                    f"{self.base_url}/chat/completions", json=payload, headers=headers)
+                    f"{self.base_url}/chat/completions", json=payload, headers=headers,
+                    timeout=self.timeout * (2 if attempt > 0 else 1))
                 latency_ms = round((time.monotonic() - t0) * 1000, 1)
 
                 if resp.status_code in _RETRYABLE_STATUS:
@@ -104,7 +109,18 @@ class OpenAICompatibleProvider:
                     tokens_in=usage.get("prompt_tokens", 0),
                     tokens_out=usage.get("completion_tokens", 0),
                     latency_ms=latency_ms, retries=attempt)
-            except (httpx.TimeoutException, httpx.TransportError) as e:
+            except httpx.TimeoutException as e:
+                if attempt >= self.max_retries:
+                    # 读超时单独提示：绝大多数情况是“模型生成太慢”而非网络故障，
+                    # 直接给出调参出口，避免用户对着“网络错误”排查
+                    raise LLMError(
+                        f"{self.name}: 读超时重试耗尽（{type(e).__name__}；模型生成可能"
+                        f"超过 {int(self.timeout * 2)}s 窗口——调大 RE_EMP_LLM_TIMEOUT "
+                        f"或换更快的模型/降级模型）", retryable=True) from e
+                last_err = str(e)
+                self._sleep(self.backoff_base * (2 ** attempt)
+                            + random.uniform(0, 0.1))
+            except httpx.TransportError as e:
                 if attempt >= self.max_retries:
                     raise LLMError(f"{self.name}: 网络错误重试耗尽: {e}",
                                    retryable=True) from e

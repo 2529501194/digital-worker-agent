@@ -19,6 +19,9 @@ set RE_EMP_LLM_MODEL=gpt-4o-mini                    :: 可选
 set RE_EMP_LLM_FALLBACK_API_KEY=...
 set RE_EMP_LLM_FALLBACK_BASE_URL=...
 set RE_EMP_LLM_FALLBACK_MODEL=...
+:: 慢模型（如 GLM-5.x，单次生成 30-50s）需留足读超时（默认 180s；
+   读超时后重试窗口自动翻倍；仍失败会提示调大该值）：
+set RE_EMP_LLM_TIMEOUT=300
 
 # 真实搜索（四种方式，有 key 时按优先级自动选择：LangSearch > Brave > SerpApi）：
 # 1) LangSearch 免费 Web Search API（set LANGSEARCH_API_KEY=*** key 在
