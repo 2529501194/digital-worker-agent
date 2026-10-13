@@ -160,16 +160,22 @@ class Orchestrator:
         return plan
 
     def _load_plan(self) -> list[dict]:
+        # 取**最后一次** plan.created：无检查点重跑（如 PLAN 阶段崩溃后重新运行）
+        # 会生成新计划，旧计划作废，恢复必须以最新计划为准
+        plan = None
         for _seq, type_, payload in self.events.replay(self.task_id):
             if type_ == "plan.created":
-                return payload["subtasks"]
-        raise RuntimeError("任务无计划事件，无法恢复")
+                plan = payload["subtasks"]
+        if plan is None:
+            raise RuntimeError("任务无计划事件，无法恢复")
+        return plan
 
     def _plan_dimensions(self) -> list[str]:
+        dims: list[str] = []
         for _seq, type_, payload in self.events.replay(self.task_id):
             if type_ == "plan.created":
-                return [str(d) for d in payload.get("compare_dimensions") or []]
-        return []
+                dims = [str(d) for d in payload.get("compare_dimensions") or []]
+        return dims
 
     # ------------------------------------------------------------- execute
     def _execute(self, plan: list[dict], cursor: int,

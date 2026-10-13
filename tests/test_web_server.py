@@ -139,6 +139,76 @@ def test_max_steps_subtask_counts_as_done(tmp_path):
         server.server_close()
 
 
+class _FlakyPlanLLM:
+    """PLAN 阶段前 N 次 LLM 调用抛异常（模拟崩溃/故障），之后恢复。
+
+    用于模拟“任务在 PLAN 阶段跑崩”：无检查点落盘（检查点在 _plan 末尾才写），
+    任务以 task.failed 收尾；恢复时整体重跑，重新生成计划即可跑完。
+    """
+
+    name = "flaky-plan"
+
+    def __init__(self, fail_first: int = 1):
+        self._inner = MockResearchLLM()
+        self._last_meta = None
+        self._plan_calls = 0
+        self.fail_first = fail_first
+        self.last_meta = None
+
+    def complete(self, system, user):
+        import json as _json
+        if "STAGE: PLAN" in user:
+            self._plan_calls += 1
+            if self._plan_calls <= self.fail_first:
+                raise RuntimeError("simulated crash during PLAN")
+            return _json.dumps({"subtasks": [{"title": "A 调研", "focus": "a"}]},
+                               ensure_ascii=False)
+        text = self._inner.complete(system, user)
+        self._last_meta = self._inner.last_meta
+        self.last_meta = self._last_meta
+        return text
+
+
+def test_resume_without_checkpoint_reruns_from_scratch(tmp_path):
+    """PLAN 阶段崩溃（无检查点）→ 前端恢复入口可用：整体重跑直至完成。"""
+    server, mgr, base = _start(tmp_path, llm=_FlakyPlanLLM(fail_first=1))
+    try:
+        # 第一次运行：PLAN 阶段崩溃 → task.failed，无检查点
+        code, body = _req(base, "POST", "/api/tasks",
+                          {"prompt": "调研 X", "task_id": "t-crash", "limit_subtasks": 1})
+        assert code == 202
+        status = _wait_done(base, "t-crash")
+        assert status == "failed"
+
+        code, body = _req(base, "GET", "/api/tasks")
+        t = next(x for x in json.loads(body)["tasks"] if x["task_id"] == "t-crash")
+        assert t["status"] == "failed" and t["resumable"] is True
+        assert t["has_checkpoint"] is False, t
+
+        # 恢复：无检查点 → 取回 prompt 整体重跑（此时 LLM 已恢复）
+        code, body = _req(base, "POST", "/api/tasks/t-crash/resume")
+        assert code == 202 and json.loads(body)["status"] == "running"
+        assert _wait_done(base, "t-crash") == "done"
+
+        # 重跑后事件流：两次 task.created 之后的计划/报告齐全
+        code, body = _req(base, "GET", "/api/tasks/t-crash/timeline")
+        types = [e[1] for e in json.loads(body)["events"]]
+        assert types.count("task.failed") == 1
+        assert "plan.created" in types and "task.completed" in types
+
+        code, report = _req(base, "GET", "/api/tasks/t-crash/report")
+        assert code == 200 and report.startswith("#")
+
+        # 恢复入口：已完成 → 400；不存在任务 → 400（无 task.created 可取回）
+        code, _ = _req(base, "POST", "/api/tasks/t-crash/resume")
+        assert code == 400
+        code, _ = _req(base, "POST", "/api/tasks/ghost/resume")
+        assert code == 400
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
 def test_task_running_conflict(tmp_path):
     server, mgr, base = _start(tmp_path, llm=_SlowMock())
     try:

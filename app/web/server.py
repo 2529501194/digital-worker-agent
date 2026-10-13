@@ -7,7 +7,8 @@ API：
     GET  /api/status          当前后端（LLM 链 / 搜索后端）
     GET  /api/tasks           任务列表 + 状态 + 子任务进度
     POST /api/tasks           {prompt, task_id?, limit_subtasks?} 后台线程运行
-    POST /api/tasks/{id}/resume   从检查点恢复
+    POST /api/tasks/{id}/resume   恢复失败/中断任务（有检查点断点续跑；
+                                  无检查点则取回 prompt 整体重跑）
     GET  /api/tasks/{id}/timeline?since=0  事件流（增量拉取）
     GET  /api/tasks/{id}/report        报告 Markdown（未生成 404）
 """
@@ -85,19 +86,22 @@ class TaskManager:
             th.start()
 
     def resume_task(self, task_id: str) -> None:
+        """恢复失败/中断的任务：
+        - 有检查点 → 断点续跑（跳过已完成子任务）；
+        - 无检查点（如 PLAN 阶段崩溃，未落任何检查点）→ 从事件流取回
+          prompt 整体重跑（编排器见无检查点会自动重新生成计划）。
+        """
         th = self._threads.get(task_id)
         if th is not None and th.is_alive():
             raise TaskRunningError(task_id)
         if self.task_status(task_id)["status"] == "done":
             raise NoCheckpointError("任务已完成，无需恢复")
-        if self.events.load_checkpoint(task_id) is None:
-            raise NoCheckpointError("任务无检查点，无法恢复")
         prompt = None
         for _seq, type_, payload in self.events.replay(task_id):
             if type_ == "task.created":
                 prompt = payload.get("prompt")
         if prompt is None:
-            raise NoCheckpointError("事件流中无 task.created，无法恢复")
+            raise NoCheckpointError("任务无事件记录（task.created），无法恢复")
         self.start_task(task_id, prompt)
 
     # ---- 状态 ----
@@ -126,10 +130,14 @@ class TaskManager:
             status = "interrupted"  # 有事件但无终态（进程被杀等）
         else:
             status = "unknown"
-        resumable = (status in ("paused", "failed", "interrupted")
-                     and self.events.load_checkpoint(task_id) is not None)
+        # 可恢复性：paused/failed/interrupted 均可从 Web 恢复——
+        # 有检查点则断点续跑；无检查点（PLAN 阶段崩溃等）则整体重跑。
+        # has_checkpoint 单列出来供前端区分按钮文案。
+        has_checkpoint = self.events.load_checkpoint(task_id) is not None
+        resumable = status in ("paused", "failed", "interrupted")
         return {
             "task_id": task_id, "status": status, "resumable": resumable,
+            "has_checkpoint": has_checkpoint,
             "subtasks_done": done, "subtasks_total": total,
             "has_report": (self.storage / "reports" / f"{task_id}.md").exists(),
         }

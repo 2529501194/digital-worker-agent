@@ -73,20 +73,22 @@ def cmd_run(a: argparse.Namespace) -> None:
 
 
 def cmd_resume(a: argparse.Namespace) -> None:
+    """恢复失败/中断任务：有检查点断点续跑；无检查点（PLAN 阶段崩溃等）
+    则从事件流取回 prompt 整体重跑（编排器见无检查点会自动重新生成计划）。"""
     storage = Path(a.storage)
     events, artifacts, tools, llm, _limit = _build_env(storage, None, verbose=False)
-    cp = events.load_checkpoint(a.task_id)
-    if cp is None:
-        print(f"任务 {a.task_id} 无检查点，无法恢复")
-        sys.exit(1)
     prompt = None
     for _s, t, p in events.replay(a.task_id):
         if t == "task.created":
             prompt = p.get("prompt")
     if prompt is None:
-        print("事件流中无 task.created，无法恢复 prompt")
+        print(f"任务 {a.task_id} 无事件记录（task.created），无法恢复")
         sys.exit(1)
-    print(f"resuming {a.task_id} from stage={cp.stage} cursor={cp.subtask_cursor}")
+    cp = events.load_checkpoint(a.task_id)
+    if cp is not None:
+        print(f"resuming {a.task_id} from stage={cp.stage} cursor={cp.subtask_cursor}")
+    else:
+        print(f"resuming {a.task_id}: 无检查点，整体重跑（重新生成计划）")
     _run(a.task_id, prompt, storage, None)
 
 

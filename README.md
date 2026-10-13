@@ -27,7 +27,7 @@ set RE_EMP_LLM_FALLBACK_MODEL=...
 
 python -m app.cli run --prompt "…" --task-id t-001 --limit-subtasks 3
 python -m app.cli timeline --task-id t-001      :: 事件时间线（含 token/延迟/重试）
-python -m app.cli resume   --task-id t-001      :: 崩溃后断点续跑
+python -m app.cli resume   --task-id t-001      :: 崩溃后恢复（有检查点断点续跑；无检查点整体重跑）
 python -m app.cli serve  --port 8000      :: 启动 Web 前端（浏览器打开 http://127.0.0.1:8000）
 ```
 
@@ -41,7 +41,7 @@ python -m app.cli serve  --port 8000      :: 启动 Web 前端（浏览器打开
 | 调用元数据观测 | `llm.called` 事件 | provider/model/tokens_in/out/latency_ms/retries 全入事件流，timeline 直接可读 |
 | 真实搜索 | `tools/search_providers.py` | Brave / SerpApi 两个 Provider，统一 `search()` 接口；失败作为 observation 交回 LLM |
 | 免费搜索/抓取 | `tools/mcp_you.py` `YouMCPWebBackend` | You.com MCP（`api.you.com/mcp?profile=free`，**无需 key**，IP 限流）；`you-search` 一次调用带回结果 + 整页 Markdown，fetch 复用免二次限流调用；无 Brave/SerpApi key 时 auto 模式自动启用，`RE_EMP_WEB=mcp` 可强制 |
-| Web 前端 | `web/server.py` + `web/index.html` | 零新增依赖（stdlib http.server + 原生 JS 单页）；JSON API（建任务/恢复/事件增量/报告）+ 任务列表/实时时间线/报告渲染/一键恢复；`python -m app.cli serve` |
+| Web 前端 | `web/server.py` + `web/index.html` | 零新增依赖（stdlib http.server + 原生 JS 单页）；JSON API（建任务/恢复/事件增量/报告）+ 任务列表/实时时间线/报告渲染/一键恢复失败任务（有检查点→断点续跑；无检查点（如 PLAN 阶段崩溃）→重新运行）；`python -m app.cli serve` |
 | 主题自适应报告 | `runtime/orchestrator.py` | PLAN 阶段产出 `compare_dimensions`（对比维度由研究主题推导，如手机市场→市场份额/价格带/目标人群），WRITE 阶段动态注入提示词，不再写死固定模板 |
 | 真实抓取 | `tools/fetch_backends.py` `HttpxFetchBackend` | httpx 抓取 + 标准库 HTML→Markdown + **磁盘缓存（TTL）**→ 恢复重放不重复抓 |
 | 缩小版任务 | `--limit-subtasks N`（默认 3） | PLAN 阶段注入上限，真实模型不遵守时硬截断兜底 |

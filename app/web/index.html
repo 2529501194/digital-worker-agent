@@ -107,6 +107,7 @@
       <div class="tab" data-tab="report">研究报告</div>
       <span style="flex:1"></span>
       <button class="ghost" id="btn-resume" style="display:none">恢复运行</button>
+      <span class="hint" id="resume-hint" style="display:none"></span>
     </div>
     <div id="view-timeline"><div id="events"></div></div>
     <div id="view-report" style="display:none"><div id="report"></div></div>
@@ -114,7 +115,7 @@
 </main>
 <script>
 "use strict";
-console.log("[digital-worker] frontend v2（若控制台显示 v1 或无此日志，请 Ctrl+F5 强制刷新）");
+console.log("[digital-worker] frontend v3（若控制台显示 v2 或无此日志，请 Ctrl+F5 强制刷新）");
 const $ = (s) => document.querySelector(s);
 let current = null;          // 当前选中任务 id
 let since = 0;              // 事件增量拉取游标
@@ -193,7 +194,23 @@ function updateDetailHead(tid) {
     $("#detail-meta").innerHTML = `<span class="id">${t.task_id}</span>
       <span class="st ${t.status}">${t.status}</span>
       ${t.subtasks_total != null ? `<span class="prog" style="font:12px var(--mono);color:var(--muted)">子任务 ${t.subtasks_done}/${t.subtasks_total}</span>` : ""}`;
-    $("#btn-resume").style.display = t.resumable ? "" : "none";
+    // 恢复按钮：失败/中断/暂停任务均可恢复——
+    // 有检查点 → “恢复运行”（断点续跑）；无检查点 → “重新运行”（整体重跑）
+    const btn = $("#btn-resume");
+    btn.style.display = t.resumable ? "" : "none";
+    const hint = $("#resume-hint");
+    if (t.resumable) {
+      if (t.has_checkpoint) {
+        btn.textContent = "恢复运行";
+        hint.textContent = "将从最近检查点继续，已完成子任务不重做";
+      } else {
+        btn.textContent = "重新运行";
+        hint.textContent = "任务无检查点（可能在计划阶段崩溃），将重新生成计划从头执行";
+      }
+      hint.style.display = "";
+    } else {
+      hint.style.display = "none";
+    }
     // 仅在“运行中 → 完成”的过渡时自动切报告页；
     // 选中一个已完成任务时停留在时间线页，不再被强制切走
     const prev = lastStatus[tid];
@@ -273,10 +290,14 @@ $("#tabs").addEventListener("click", (e) => {
 });
 $("#btn-resume").onclick = async () => {
   if (!current) return;
-  const r = await api(`/api/tasks/${encodeURIComponent(current)}/resume`,
-                      { method: "POST", headers: {"Content-Type":"application/json"}, body: "{}" });
-  if (r.ok) { pollGen++; since = 0; $("#events").innerHTML = ""; switchTab("timeline"); pollEvents(); }
-  else alert("恢复失败：" + (r.body.error || r.code));
+  const btn = $("#btn-resume");
+  btn.disabled = true;  // 防连点：恢复请求在途期间锁住按钮
+  try {
+    const r = await api(`/api/tasks/${encodeURIComponent(current)}/resume`,
+                        { method: "POST", headers: {"Content-Type":"application/json"}, body: "{}" });
+    if (r.ok) { pollGen++; since = 0; $("#events").innerHTML = ""; switchTab("timeline"); pollEvents(); }
+    else alert("恢复失败：" + (r.body.error || r.code));
+  } finally { btn.disabled = false; }
 };
 $("#btn-run").onclick = async () => {
   const prompt = $("#prompt").value.trim();

@@ -69,7 +69,8 @@ const tabRP = { dataset: { tab: 'report' }, classList: { toggle(){} } };
 $('tabs').querySelectorAll = (s) => (s === '.tab' ? [tabTL, tabRP] : []);
 const document = { querySelector: (sel) => $(sel), createElement: (t) => makeEl('<' + t + '>') };
 
-// ---- fetch 桩：两个 done 历史任务 ----
+// ---- fetch 桩：两个 done 历史任务 + 一个 failed（无检查点）+ 一个 interrupted（有检查点）----
+let resumeCalls = 0;
 function fetch(path, opt) {
   const key = (opt && opt.method === 'POST' ? 'POST ' : 'GET ') + path;
   const J = (o) => Promise.resolve({ ok: true, headers: { get: () => 'application/json' }, json: () => Promise.resolve(o) });
@@ -79,11 +80,22 @@ function fetch(path, opt) {
     return J({ events: [[1, 'task.created', {}], [2, 'llm.called', {}], [3, 'task.completed', {}]], status: 'done' });
   if (key.startsWith('GET /api/tasks/B/timeline'))
     return J({ events: [[1, 'task.created', {}], [2, 'tool.called', { tool: 'web_search', ok: true }], [3, 'task.completed', {}]], status: 'done' });
+  // 失败且无检查点（PLAN 阶段崩溃）→ 可“重新运行”
+  if (key.startsWith('GET /api/tasks/C/timeline'))
+    return J({ events: [[1, 'task.created', {}], [2, 'llm.called', {}],
+                        [3, 'task.failed', { error: 'LLMError: 500' }]], status: 'failed' });
+  // 中断且有检查点（进程被杀，跑到子任务 1）→ 可“恢复运行”
+  if (key.startsWith('GET /api/tasks/D/timeline'))
+    return J({ events: [[1, 'task.created', {}], [2, 'plan.created', {}],
+                        [3, 'checkpoint.saved', { stage: 'EXECUTE', subtask_cursor: 1 }]], status: 'interrupted' });
   if (key.startsWith('GET /api/tasks/A/report')) return T('# 报告 A\n\n内容A');
   if (key.startsWith('GET /api/tasks/B/report')) return T('# 报告 B\n\n内容B');
+  if (key === 'POST /api/tasks/C/resume') { resumeCalls++; return J({ task_id: 'C', status: 'running' }); }
   if (key.startsWith('GET /api/tasks')) return J({ tasks: [
-    { task_id: 'A', status: 'done', resumable: false, subtasks_done: 3, subtasks_total: 3, has_report: true },
-    { task_id: 'B', status: 'done', resumable: false, subtasks_done: 3, subtasks_total: 3, has_report: true }] });
+    { task_id: 'A', status: 'done', resumable: false, has_checkpoint: true, subtasks_done: 3, subtasks_total: 3, has_report: true },
+    { task_id: 'B', status: 'done', resumable: false, has_checkpoint: true, subtasks_done: 3, subtasks_total: 3, has_report: true },
+    { task_id: 'C', status: 'failed', resumable: true, has_checkpoint: false, subtasks_done: 0, subtasks_total: 3, has_report: false },
+    { task_id: 'D', status: 'interrupted', resumable: true, has_checkpoint: true, subtasks_done: 1, subtasks_total: 3, has_report: false }] });
   return Promise.resolve({ ok: false, code: 404, headers: { get: () => 'application/json' }, json: () => Promise.resolve({ error: 'nf' }) });
 }
 function alert(m) { console.log('ALERT:', m); }
@@ -124,6 +136,26 @@ function check(name, cond) { console.log(`${cond ? 'PASS' : 'FAIL'}  ${name}`); 
     try { $('tabs').__click({ target: tabRP }); } catch (e) { errors.push('tab throw: ' + e.message); }
     await tick(10);
     check('任务B：手动点报告页可渲染', els['report'].innerHTML.includes('报告 B'));
+
+    // ---- 任务C：失败且无检查点 → 显示“重新运行”按钮，点击后恢复轮询 ----
+    click(els['task-list'].children[2]);
+    await tick(30);
+    check('任务C（failed 无检查点）：按钮可见且文案为“重新运行”',
+      els['btn-resume'].style.display !== 'none' && els['btn-resume'].textContent === '重新运行');
+    check('任务C：无检查点提示语可见',
+      els['resume-hint'].style.display !== 'none' && els['resume-hint'].textContent.includes('重新生成计划'));
+    click(els['btn-resume']);
+    await tick(30);
+    check('任务C：点击“重新运行”后时间线重拉（3 条事件）且无报错',
+      els['events'].children.length === 3 && errors.length === 0);
+    check('任务C：POST /api/tasks/C/resume 被调用', resumeCalls === 1);
+
+    // ---- 任务D：中断且有检查点 → 显示“恢复运行”按钮 ----
+    click(els['task-list'].children[3]);
+    await tick(30);
+    check('任务D（interrupted 有检查点）：按钮文案为“恢复运行”',
+      els['btn-resume'].style.display !== 'none' && els['btn-resume'].textContent === '恢复运行');
+    check('任务D：检查点提示语可见', els['resume-hint'].textContent.includes('检查点'));
   } catch (e) { stepErr = e; }
   check('无 JS 错误（含未捕获 promise rejection / 点击抛错）',
     errors.length === 0 && !stepErr);
