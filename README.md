@@ -36,6 +36,11 @@ python -m app.cli resume   --task-id t-001      :: 崩溃后恢复（有检查�
 python -m app.cli serve  --port 8000      :: 启动 Web 前端（浏览器打开 http://127.0.0.1:8000）
 ```
 
+Web 前端「模型配置」面板可直接增删改 LLM 降级链（含选主模型/重排序）
+与各搜索后端的 API key，持久化到 `storage/models.json`（重启仍生效，
+CLI 与 Web 服务共用；无此文件时用环境变量配置）。变更对新任务/恢复
+任务生效，运行中任务沿用原配置。
+
 ## M2 新增能力
 
 | 能力 | 实现 | 说明 |
@@ -46,7 +51,8 @@ python -m app.cli serve  --port 8000      :: 启动 Web 前端（浏览器打开
 | 调用元数据观测 | `llm.called` 事件 | provider/model/tokens_in/out/latency_ms/retries 全入事件流，timeline 直接可读 |
 | 真实搜索 | `tools/search_providers.py` | LangSearch / Brave / SerpApi 三个 Provider，统一 `search()` 接口（LangSearch：langsearch.com 免费 API，Bearer key，snippet 模式）；失败作为 observation 交回 LLM |
 | 免费搜索/抓取 | `tools/mcp_you.py` `YouMCPWebBackend` | You.com MCP（`api.you.com/mcp?profile=free`，**无需 key**，IP 限流）；`you-search` 一次调用带回结果 + 整页 Markdown，fetch 复用免二次限流调用；无 Brave/SerpApi key 时 auto 模式自动启用，`RE_EMP_WEB=mcp` 可强制 |
-| Web 前端 | `web/server.py` + `web/index.html` | 零新增依赖（stdlib http.server + 原生 JS 单页）；JSON API（建任务/恢复/事件增量/报告）+ 任务列表/实时时间线/报告渲染/一键恢复失败任务（有检查点→断点续跑；无检查点（如 PLAN 阶段崩溃）→重新运行）；`python -m app.cli serve` |
+| Web 前端 | `web/server.py` + `web/index.html` | 零新增依赖（stdlib http.server + 原生 JS 单页）；JSON API（建任务/恢复/事件增量/报告/模型配置）+ 任务列表/实时时间线/报告渲染/一键恢复失败任务（有检查点→断点续跑；无检查点（如 PLAN 阶段崩溃）→重新运行）；`python -m app.cli serve` |
+| 模型配置（Web） | `runtime/model_registry.py` + `/api/models*` | 前端「模型配置」面板：LLM 降级链查看/增删改/重排序（首位为主模型）+ 搜索 key（LangSearch/Brave/SerpApi）增删改；变更后立即重建 ModelGateway/搜索后端并持久化 `storage/models.json`（llm/web 分节，重启仍生效，CLI 共用）；测试注入 llm/web 时 API 只读（409） |
 | 主题自适应报告 | `runtime/orchestrator.py` | PLAN 阶段产出 `compare_dimensions`（对比维度由研究主题推导，如手机市场→市场份额/价格带/目标人群），WRITE 阶段动态注入提示词，不再写死固定模板 |
 | 真实抓取 | `tools/fetch_backends.py` `HttpxFetchBackend` | httpx 抓取 + 标准库 HTML→Markdown + **磁盘缓存（TTL）**→ 恢复重放不重复抓 |
 | 缩小版任务 | `--limit-subtasks N`（默认 3） | PLAN 阶段注入上限，真实模型不遵守时硬截断兜底 |
@@ -68,7 +74,7 @@ app/config.py                 env 配置 → 组件装配（无 key 降级 mock�
 app/cli.py                    run / resume / timeline
 ```
 
-## 测试（29 项，全离线可跑）
+## 测试（64 项 Python + 16 项前端 DOM，全离线可跑）
 
 ```bash
 pytest tests/ -q
@@ -77,8 +83,11 @@ pytest tests/ -q
 - `test_agent_loop.py` — 解析失败恢复、工具错误观察、步数/预算护栏
 - `test_orchestrator.py` — 端到端研究任务、幂等重跑、预算收尾
 - `test_recovery.py` — kill 模拟断点续跑、外部调用不重复
-- `test_llm_gateway.py` — 重试/退避、401 不重试、降级链、熔断生命周期、token 预算、plan_limit
-- `test_web_real.py` — 本地 HTTP server 验证真实抓取链路（HTML→MD、404、磁盘缓存防重复抓取、断网优雅降级）、Brave/SerpApi 响应解析
+- `test_llm_gateway.py` — 重试/退避、401 不重试、降级链、熔断生命周期、读超时窗口翻倍救慢模型、token 预算、plan_limit
+- `test_web_real.py` — 本地 HTTP server 验证真实抓取链路（HTML→MD、404、磁盘缓存防重复抓取、断网优雅降级）、LangSearch/Brave/SerpApi 响应解析与 build_web 优先级
+- `test_model_registry.py` — LLM 降级链/搜索 key 增删改/重排序、models.json 分节持久化、损坏回退
+- `test_web_server.py` — `/api/models*` 全周期（增删改/重排/web key/持久化重载）+ 注入模式只读 409
+- `frontend_dom_test.js` — 含模型配置面板（链渲染/重排/添加）回归
 
 HTTP client / sleep / clock 全部可注入，测试不发真实网络请求。
 

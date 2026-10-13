@@ -71,6 +71,28 @@
   #report blockquote { border-left: 3px solid var(--line); margin: 8px 0; padding: 2px 12px; color: var(--muted); }
   .empty { color: var(--muted); text-align: center; padding: 40px 0; }
   .hint { font-size: 12px; color: var(--muted); margin-top: 6px; }
+  .msec { font-size: 12px; color: var(--muted); margin: 12px 0 4px; }
+  .model-row, .web-row { display: flex; align-items: center; gap: 6px;
+    padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px;
+    margin-top: 6px; font-size: 13px; }
+  .model-row .pos { font: 11px var(--mono); color: var(--muted); width: 20px; }
+  .model-row .nm, .web-row .nm { font-weight: 600; font: 12px var(--mono); }
+  .model-row .md { font: 11px var(--mono); color: var(--muted); flex: 1;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .model-row .ok, .web-row .ok { color: #2c7a3f; font-size: 11px; }
+  .model-row .err { color: #c0392b; font-size: 11px; }
+  .model-row button.mini, .model-edit button.mini, .web-row button.mini {
+    border: 1px solid var(--line); background: #fff; color: var(--muted);
+    padding: 2px 7px; font-size: 12px; }
+  .model-edit { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px;
+    padding: 6px 8px; border: 1px dashed var(--accent); border-radius: 6px; }
+  .model-edit input, .web-row input { border: 1px solid var(--line);
+    border-radius: 6px; padding: 4px 6px; font: 12px var(--mono); }
+  .model-edit input, .web-row input { flex: 1; min-width: 120px; }
+  .web-row .cur { font-size: 11px; color: var(--accent); }
+  .madd { margin-top: 8px; }
+  .madd input { border: 1px solid var(--line); border-radius: 6px;
+    padding: 4px 6px; font: 12px var(--mono); }
   @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
 </style>
 </head>
@@ -96,6 +118,27 @@
       <h2>任务</h2>
       <div id="task-list"><div class="empty">暂无任务</div></div>
     </div>
+    <div class="panel" style="margin-top:14px">
+      <h2>模型配置</h2>
+      <div id="model-status" class="hint" style="margin-top:0">加载中…</div>
+      <h3 class="msec">LLM 降级链（首位为主模型）</h3>
+      <div id="llm-chain"></div>
+      <div class="madd">
+        <div class="row">
+          <input type="text" id="llm-new-name" placeholder="name" style="flex:0 0 84px">
+          <input type="text" id="llm-new-model" placeholder="模型名，如 glm-5.3" style="flex:1">
+        </div>
+        <div class="row">
+          <input type="text" id="llm-new-base" placeholder="base_url（留空 = OpenAI 兼容默认）" style="flex:1">
+          <input type="password" id="llm-new-key" placeholder="API Key" style="flex:1">
+        </div>
+        <div class="row"><button id="btn-llm-add" class="ghost">添加模型</button></div>
+      </div>
+      <h3 class="msec">Web 搜索</h3>
+      <div id="web-backends"></div>
+      <div class="hint">变更对新任务/恢复任务生效，运行中任务沿用原配置；
+        持久化于 storage/models.json（key 明文，勿提交仓库）。</div>
+    </div>
   </div>
   <div class="panel">
     <div id="detail-head">
@@ -115,7 +158,7 @@
 </main>
 <script>
 "use strict";
-console.log("[digital-worker] frontend v3（若控制台显示 v2 或无此日志，请 Ctrl+F5 强制刷新）");
+console.log("[digital-worker] frontend v4（模型配置面板；若控制台显示 v3 或更早，请 Ctrl+F5 强制刷新）");
 const $ = (s) => document.querySelector(s);
 let current = null;          // 当前选中任务 id
 let since = 0;              // 事件增量拉取游标
@@ -162,6 +205,146 @@ async function loadStatus() {
   if (r.ok) {
     $("#b-llm").textContent = "LLM: " + r.body.llm;
     $("#b-web").textContent = "Web: " + r.body.web;
+  }
+}
+
+// ---- 模型配置（LLM 降级链增删改/重排 + Web 搜索 key） ----
+async function loadModels() {
+  const r = await api("/api/models");
+  if (!r.ok) { $("#model-status").textContent = "模型配置加载失败：" + (r.body.error || r.code); return; }
+  $("#model-status").textContent = "";
+  renderLlmChain(r.body.llm);
+  renderWebBackends(r.body.web);
+}
+
+function renderLlmChain(llm) {
+  const box = $("#llm-chain");
+  box.innerHTML = "";
+  if (!llm.chain.length)
+    box.innerHTML = '<div class="hint">未配置模型（当前 mock，真实任务会失败；下方可添加）</div>';
+  for (const p of llm.chain) {
+    const row = document.createElement("div");
+    row.className = "model-row";
+    const i = p.position, n = llm.chain.length;
+    row.innerHTML = `<span class="pos">#${i+1}</span><span class="nm">${esc(p.name)}</span>` +
+      `<span class="md" title="${esc(p.base_url||"")}">${esc(p.model)}</span>` +
+      (p.has_key ? '<span class="ok">key✓</span>' : '<span class="err">无key</span>') +
+      (llm.locked ? "" : `
+      <button class="mini" data-act="up" ${i===0?"disabled":""} title="上移（更靠近主模型）">↑</button>
+      <button class="mini" data-act="down" ${i===n-1?"disabled":""}>↓</button>
+      <button class="mini" data-act="edit">改</button>
+      <button class="mini" data-act="del">✕</button>`);
+    if (!llm.locked) {
+      row.onclick = (e) => {
+        const act = e.target.dataset ? e.target.dataset.act : null;
+        if (!act) return;
+        e.stopPropagation();
+        if (act === "up" || act === "down") {
+          const order = llm.chain.map(x => x.name);
+          const j = order.indexOf(p.name), k = act === "up" ? j - 1 : j + 1;
+          if (k < 0 || k >= order.length) return;
+          [order[j], order[k]] = [order[k], order[j]];
+          orderModels(order);
+        } else if (act === "edit") {
+          editModel(p);
+        } else if (act === "del") {
+          if (confirm(`删除模型 ${p.name}？（将不再参与降级链）`)) deleteModel(p.name);
+        }
+      };
+    }
+    box.appendChild(row);
+  }
+  if (llm.locked) {
+    const d = document.createElement("div");
+    d.className = "hint"; d.textContent = "只读（当前模式 llm 已注入）";
+    box.appendChild(d);
+  }
+}
+
+function editModel(p) {
+  const box = $("#llm-chain");
+  const div = document.createElement("div");
+  div.className = "model-edit";
+  div.innerHTML = `
+    <input id="me-model" value="${esc(p.model)}" placeholder="模型名">
+    <input id="me-base" value="${esc(p.base_url||"")}" placeholder="base_url">
+    <input id="me-key" type="password" placeholder="${p.has_key ? "••••（留空保持原 key）" : "API Key"}">
+    <button class="mini" id="me-save">保存</button>
+    <button class="mini" id="me-cancel">取消</button>`;
+  box.appendChild(div);
+  $("#me-cancel").onclick = () => { div.remove(); };
+  $("#me-save").onclick = async () => {
+    const body = { model: $("#me-model").value };
+    if ($("#me-base").value !== (p.base_url || "")) body.base_url = $("#me-base").value;
+    if ($("#me-key").value) body.key = $("#me-key").value;  // 留空 = 保持原 key
+    const r = await api(`/api/models/llm/${encodeURIComponent(p.name)}`,
+      { method: "PUT", headers: {"Content-Type":"application/json"},
+        body: JSON.stringify(body) });
+    if (r.ok) { div.remove(); loadModels(); loadStatus(); }
+    else alert("保存失败：" + (r.body.error || r.code));
+  };
+}
+
+async function orderModels(order) {
+  const r = await api("/api/models/llm/order",
+    { method: "POST", headers: {"Content-Type":"application/json"},
+      body: JSON.stringify({ order }) });
+  if (r.ok) { loadModels(); loadStatus(); }
+  else alert("重排失败：" + (r.body.error || r.code));
+}
+
+async function deleteModel(name) {
+  const r = await api(`/api/models/llm/${encodeURIComponent(name)}`, { method: "DELETE" });
+  if (r.ok) { loadModels(); loadStatus(); }
+  else alert("删除失败：" + (r.body.error || r.code));
+}
+
+$("#btn-llm-add").onclick = async () => {
+  const body = { name: $("#llm-new-name").value.trim(),
+                 model: $("#llm-new-model").value.trim(),
+                 base_url: $("#llm-new-base").value.trim(),
+                 key: $("#llm-new-key").value.trim() };
+  if (!body.name || !body.model) { alert("请填写 name 与模型名"); return; }
+  const r = await api("/api/models/llm",
+    { method: "POST", headers: {"Content-Type":"application/json"},
+      body: JSON.stringify(body) });
+  if (r.ok) {
+    $("#llm-new-name").value = ""; $("#llm-new-model").value = "";
+    $("#llm-new-base").value = ""; $("#llm-new-key").value = "";
+    loadModels(); loadStatus();
+  } else alert("添加失败：" + (r.body.error || r.code));
+};
+
+function renderWebBackends(web) {
+  const box = $("#web-backends");
+  box.innerHTML = `<div class="hint" style="margin-top:0">当前后端：<b>${esc(web.active || "-")}</b>${web.locked ? "（只读）" : ""}</div>`;
+  for (const b of (web.backends || [])) {
+    const row = document.createElement("div");
+    row.className = "web-row";
+    if (b.kind === "http") {
+      row.innerHTML = `<span class="nm" style="flex:0 0 84px">${b.name}</span>` +
+        (b.active ? '<span class="cur">当前</span>' : "") +
+        `<input id="wk-${b.name}" type="password"
+          placeholder="${b.has_key ? "••••（留空保持；输入新值替换）" : "API Key"}">` +
+        (web.locked ? "" : `<button class="mini" id="ws-${b.name}">保存</button>`);
+      if (!web.locked) $("#ws-" + b.name).onclick = async () => {
+        const v = $("#wk-" + b.name).value;
+        if (!v && b.has_key && !confirm(`清除 ${b.name} 的 key？（该后端将不再使用）`)) return;
+        const r = await api("/api/models/web",
+          { method: "POST", headers: {"Content-Type":"application/json"},
+            body: JSON.stringify({ backend: b.name, key: v }) });
+        if (r.ok) { loadModels(); loadStatus(); }
+        else alert("保存失败：" + (r.body.error || r.code));
+      };
+    } else if (b.name === "you-mcp") {
+      row.innerHTML = `<span class="nm" style="flex:0 0 84px">you-mcp</span>
+        <span class="md">${b.active ? "当前（免费 MCP，无需 key，IP 限流）"
+          : (b.available ? "可用（无 key 时自动启用）" : "不可用（you-mcp 关闭或有 key 后端优先）")}</span>`;
+    } else {
+      row.innerHTML = `<span class="nm" style="flex:0 0 84px">mock</span>
+        <span class="md">${b.active ? "当前（离线演示模式）" : "无 key 且 you-mcp 关闭时的兜底"}</span>`;
+    }
+    box.appendChild(row);
   }
 }
 
@@ -316,6 +499,7 @@ $("#btn-run").onclick = async () => {
 
 loadStatus();
 refreshTasks();
+loadModels();
 setInterval(refreshTasks, 4000);
 </script>
 </body>

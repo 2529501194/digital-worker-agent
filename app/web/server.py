@@ -11,6 +11,12 @@ API：
                                   无检查点则取回 prompt 整体重跑）
     GET  /api/tasks/{id}/timeline?since=0  事件流（增量拉取）
     GET  /api/tasks/{id}/report        报告 Markdown（未生成 404）
+    GET  /api/models         模型配置（LLM 降级链 + Web 搜索后端视图）
+    POST /api/models/llm     {name, model, base_url?, key?} 新增模型（201）
+    PUT  /api/models/llm/{name}  {model?, key?, base_url?} 修改模型
+    DELETE /api/models/llm/{name}  删除模型
+    POST /api/models/llm/order {order: [...]} 重排降级链（首位为主模型）
+    POST /api/models/web     {backend, key} 设置/清除搜索 key；{you_mcp: bool} 开关
 """
 from __future__ import annotations
 
@@ -21,11 +27,12 @@ import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
 from ..config import AppConfig, build_llm, build_web
 from ..runtime.budget import Budget
 from ..runtime.events import EventStore
+from ..runtime.model_registry import ModelRegistry, WebBackendRegistry
 from ..runtime.orchestrator import Orchestrator
 from ..tools.artifact_store import ArtifactStore
 from ..tools.registry import RESEARCHER_WHITELIST, ToolRouter
@@ -47,20 +54,65 @@ class TaskManager:
         self.storage = Path(storage_root)
         self.events = EventStore(self.storage / "events.db")
         self.artifacts = ArtifactStore(self.storage / "artifacts")
-        if llm is None or web is None:
-            cfg = AppConfig.from_env()
-            llm = llm or build_llm(cfg, verbose=verbose)
-            web = web or build_web(cfg, self.storage, verbose=verbose)
-        self.llm, self.web = llm, web
-        self.tools = ToolRouter(web, self.artifacts, RESEARCHER_WHITELIST)
+        cfg = AppConfig.from_env()
+        # 模型配置注册表：两者均未注入（Web 服务模式）时启用运行时增删改/
+        # 重排序 + 持久化（storage/models.json，重启后仍生效）。
+        # 注入 llm/web（测试/演示模式）时注册表关闭，/api/models 只读。
+        # 注意：已运行任务持有旧 gateway/后端引用不受变更影响，新任务/恢复用新配置。
+        if llm is None and web is None:
+            file_lock = threading.Lock()
+            self.model_registry = ModelRegistry(
+                cfg.llm_providers, persist_path=self.storage / "models.json",
+                file_lock=file_lock)
+            self.web_registry = WebBackendRegistry(
+                cfg, self.storage, persist_path=self.storage / "models.json",
+                file_lock=file_lock)
+            self._injected_llm = None
+            self._injected_web = None
+            if verbose:
+                print(f"[llm] model-gateway 降级链: {self.model_registry.description()}")
+                print(f"[web] 当前后端: {self.web.name}")
+        else:
+            self.model_registry = None
+            self.web_registry = None
+            self._injected_llm = llm or build_llm(cfg, verbose=verbose)
+            self._injected_web = web or build_web(cfg, self.storage, verbose=verbose)
+        self._tools = None
+        self._tools_version = -1
         self._threads: dict[str, threading.Thread] = {}
         self._lock = threading.Lock()
         self.index_html = (Path(__file__).with_name("index.html")
                           .read_text(encoding="utf-8"))
+
+    # ---- 动态后端（跟随注册表重建；运行中任务持有旧引用） ----
+    @property
+    def llm(self):
+        return (self.model_registry.gateway if self.model_registry
+                else self._injected_llm)
+
+    @property
+    def web(self):
+        return (self.web_registry.backend if self.web_registry
+                else self._injected_web)
+
+    @property
+    def llm_desc(self) -> str:
+        if self.model_registry:
+            return self.model_registry.description()
+        llm = self._injected_llm
         if hasattr(llm, "providers"):  # ModelGateway：展示降级链
-            self.llm_desc = " → ".join(p.name for p in llm.providers)
-        else:
-            self.llm_desc = getattr(llm, "name", "mock")
+            return " → ".join(p.name for p in llm.providers)
+        return getattr(llm, "name", "mock")
+
+    @property
+    def tools(self):
+        """web 后端重建后重建 ToolRouter（version 变化时）。"""
+        v = self.web_registry.version if self.web_registry else 0
+        if self._tools is None or self._tools_version != v:
+            self._tools = ToolRouter(self.web, self.artifacts,
+                                     RESEARCHER_WHITELIST)
+            self._tools_version = v
+        return self._tools
 
     # ---- 任务 ----
     def start_task(self, task_id: str, prompt: str, limit_subtasks: int = 3) -> None:
@@ -150,6 +202,29 @@ class TaskManager:
         return f.read_text(encoding="utf-8") if f.exists() else None
 
 
+def models_payload(manager: TaskManager) -> dict:
+    """GET /api/models：LLM 降级链 + Web 搜索后端视图。注入模式下只读。"""
+    if manager.model_registry:
+        llm_view = {"chain": manager.model_registry.chain(), "locked": False}
+    else:
+        providers = getattr(manager.llm, "providers", None)
+        llm_view = {
+            "chain": ([{"position": i, "name": p.name, "model": p.model,
+                        "base_url": p.base_url, "has_key": bool(p.api_key)}
+                      for i, p in enumerate(providers)] if providers else []),
+            "locked": True}
+    if manager.web_registry:
+        web_view = manager.web_registry.available()
+        web_view["locked"] = False
+    else:
+        web_view = {"active": getattr(manager.web, "name",
+                                     type(manager.web).__name__),
+                    "backends": [], "locked": True}
+    return {"llm": llm_view, "web": web_view,
+            "persisted": str(manager.storage / "models.json")
+            if manager.model_registry else None}
+
+
 def _make_handler(manager: TaskManager) -> type[BaseHTTPRequestHandler]:
     class Handler(BaseHTTPRequestHandler):
         server_version = "research-employee"
@@ -175,6 +250,14 @@ def _make_handler(manager: TaskManager) -> type[BaseHTTPRequestHandler]:
         def _json(self, obj, code: int = 200) -> None:
             self._send(code, json.dumps(obj, ensure_ascii=False).encode("utf-8"),
                        "application/json; charset=utf-8")
+
+        def _read_json(self):
+            """读 JSON body；无效 → None（调用方回 400）。"""
+            try:
+                n = int(self.headers.get("Content-Length") or 0)
+                return json.loads(self.rfile.read(n) or b"{}") if n else {}
+            except json.JSONDecodeError:
+                return None
 
         def _text(self, text: str, content_type: str, code: int = 200,
                   no_cache: bool = False) -> None:
@@ -205,6 +288,8 @@ def _make_handler(manager: TaskManager) -> type[BaseHTTPRequestHandler]:
                     self._json({"error": "报告尚未生成"}, 404)
                 else:
                     self._text(text, "text/markdown; charset=utf-8")
+            elif path == "/api/models":
+                self._json(models_payload(manager))
             else:
                 self._json({"error": "not found"}, 404)
 
@@ -219,13 +304,56 @@ def _make_handler(manager: TaskManager) -> type[BaseHTTPRequestHandler]:
         # ---- POST ----
         def do_POST(self) -> None:
             path = urlsplit(self.path).path
-            try:
-                n = int(self.headers.get("Content-Length") or 0)
-                body = json.loads(self.rfile.read(n) or b"{}") if n else {}
-            except json.JSONDecodeError:
+            body = self._read_json()
+            if body is None:
                 self._json({"error": "invalid json"}, 400)
                 return
-            if path == "/api/tasks":
+            if path == "/api/models/llm":
+                if manager.model_registry is None:
+                    self._json({"error": "当前模式模型配置为只读"}, 409)
+                    return
+                try:
+                    view = manager.model_registry.add(
+                        body.get("name"), body.get("model"),
+                        key=body.get("key", ""), base_url=body.get("base_url", ""))
+                except ValueError as e:
+                    self._json({"error": str(e)}, 400)
+                    return
+                self._json({"added": view}, 201)
+            elif path == "/api/models/llm/order":
+                if manager.model_registry is None:
+                    self._json({"error": "当前模式模型配置为只读"}, 409)
+                    return
+                order = body.get("order")
+                if not isinstance(order, list) or not all(
+                        isinstance(x, str) for x in order):
+                    self._json({"error": "order 必须是模型 name 列表"}, 400)
+                    return
+                try:
+                    chain = manager.model_registry.reorder(order)
+                except ValueError as e:
+                    self._json({"error": str(e)}, 400)
+                    return
+                self._json({"chain": chain})
+            elif path == "/api/models/web":
+                if manager.web_registry is None:
+                    self._json({"error": "当前模式模型配置为只读"}, 409)
+                    return
+                try:
+                    if "you_mcp" in body:
+                        view = manager.web_registry.set_you_mcp(
+                            bool(body["you_mcp"]))
+                    else:
+                        if not body.get("backend"):
+                            self._json({"error": "backend 不能为空"}, 400)
+                            return
+                        view = manager.web_registry.set_key(
+                            body["backend"], body.get("key", ""))
+                except ValueError as e:
+                    self._json({"error": str(e)}, 400)
+                    return
+                self._json(view)
+            elif path == "/api/tasks":
                 prompt = (body.get("prompt") or "").strip()
                 if not prompt:
                     self._json({"error": "prompt 不能为空"}, 400)
@@ -250,6 +378,45 @@ def _make_handler(manager: TaskManager) -> type[BaseHTTPRequestHandler]:
                 self._json({"task_id": m.group(1), "status": "running"}, 202)
             else:
                 self._json({"error": "not found"}, 404)
+
+        # ---- PUT / DELETE（模型配置增删改） ----
+        def do_PUT(self) -> None:
+            path = urlsplit(self.path).path
+            m = re.fullmatch(r"/api/models/llm/([^/]+)", path)
+            if not m:
+                self._json({"error": "not found"}, 404)
+                return
+            body = self._read_json()
+            if body is None:
+                self._json({"error": "invalid json"}, 400)
+                return
+            if manager.model_registry is None:
+                self._json({"error": "当前模式模型配置为只读"}, 409)
+                return
+            try:
+                view = manager.model_registry.update(
+                    unquote(m.group(1)), model=body.get("model"),
+                    key=body.get("key"), base_url=body.get("base_url"))
+            except ValueError as e:
+                self._json({"error": str(e)}, 400)
+                return
+            self._json({"updated": view})
+
+        def do_DELETE(self) -> None:
+            path = urlsplit(self.path).path
+            m = re.fullmatch(r"/api/models/llm/([^/]+)", path)
+            if not m:
+                self._json({"error": "not found"}, 404)
+                return
+            if manager.model_registry is None:
+                self._json({"error": "当前模式模型配置为只读"}, 409)
+                return
+            try:
+                res = manager.model_registry.remove(unquote(m.group(1)))
+            except ValueError as e:
+                self._json({"error": str(e)}, 400)
+                return
+            self._json(res)
 
     return Handler
 

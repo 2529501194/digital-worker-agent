@@ -229,3 +229,104 @@ def test_task_running_conflict(tmp_path):
     finally:
         server.shutdown()
         server.server_close()
+
+
+# ---- 模型配置 API（/api/models*） ----
+
+_ENV_KEYS = ("RE_EMP_LLM_API_KEY", "OPENAI_API_KEY", "RE_EMP_LLM_FALLBACK_API_KEY",
+             "LANGSEARCH_API_KEY", "BRAVE_API_KEY", "SERPAPI_API_KEY",
+             "RE_EMP_YOU_MCP", "RE_EMP_LLM_NAME", "RE_EMP_LLM_MODEL")
+
+
+def _start_open(tmp_path, monkeypatch):
+    """注册表模式：llm/web 均不注入（先清掉环境变量保证确定性）。"""
+    for k in _ENV_KEYS:
+        monkeypatch.delenv(k, raising=False)
+    from app.web.server import create_server
+    server, mgr = create_server(tmp_path / "storage", port=0)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, mgr, f"http://127.0.0.1:{server.server_address[1]}"
+
+
+def test_models_api_full_cycle(tmp_path, monkeypatch):
+    server, mgr, base = _start_open(tmp_path, monkeypatch)
+    try:
+        # 初始视图：空链（mock）+ you-mcp（默认启用）
+        code, body = _req(base, "GET", "/api/models")
+        assert code == 200
+        d = json.loads(body)
+        assert d["llm"]["chain"] == [] and d["llm"]["locked"] is False
+        assert d["web"]["active"] == "you-mcp"
+
+        # 添加两个模型（201）
+        code, body = _req(base, "POST", "/api/models/llm",
+                          {"name": "primary", "model": "glm-5.3", "key": "sk-1",
+                           "base_url": "https://zhipu/v1"})
+        assert code == 201 and json.loads(body)["added"]["name"] == "primary"
+        code, _ = _req(base, "POST", "/api/models/llm",
+                       {"name": "fallback", "model": "gpt-4o-mini", "key": "sk-2"})
+        assert code == 201
+        assert _req(base, "POST", "/api/models/llm",
+                    {"name": "primary", "model": "x"})[0] == 400  # 重名
+        assert _req(base, "POST", "/api/models/llm",
+                    {"name": "n", "model": "  "})[0] == 400       # 空模型名
+
+        # 重排：fallback 升为主模型；/api/status 跟随
+        code, body = _req(base, "POST", "/api/models/llm/order",
+                          {"order": ["fallback", "primary"]})
+        assert code == 200
+        assert [c["name"] for c in json.loads(body)["chain"]] == \
+            ["fallback", "primary"]
+        assert json.loads(_req(base, "GET", "/api/status")[1])["llm"] == \
+            "fallback → primary"
+        assert _req(base, "POST", "/api/models/llm/order",
+                    {"order": ["fallback"]})[0] == 400  # 不是完整重排
+
+        # 修改 key；未知模型 400
+        code, _ = _req(base, "PUT", "/api/models/llm/primary", {"key": "sk-1-new"})
+        assert code == 200
+        assert _req(base, "PUT", "/api/models/llm/ghost", {"model": "m"})[0] == 400
+
+        # 删除；未知 400
+        code, body = _req(base, "DELETE", "/api/models/llm/fallback")
+        assert code == 200 and json.loads(body) == {"removed": "fallback"}
+        assert _req(base, "DELETE", "/api/models/llm/ghost")[0] == 400
+
+        # Web 搜索 key：设置 brave → 真实后端；未知后端 400
+        code, body = _req(base, "POST", "/api/models/web",
+                          {"backend": "brave", "key": "bk"})
+        assert code == 200 and json.loads(body)["active"] == "brave+http"
+        assert _req(base, "POST", "/api/models/web",
+                    {"backend": "google", "key": "x"})[0] == 400
+
+        # 持久化：同一 storage 新 manager 读到全部变更（重启不丢）
+        from app.web.server import TaskManager
+        mgr2 = TaskManager(tmp_path / "storage")
+        assert [s.name for s in mgr2.model_registry.specs] == ["primary"]
+        assert mgr2.model_registry.specs[0].api_key == "sk-1-new"
+        assert mgr2.web_registry.keys["brave"] == "bk"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_models_api_locked_when_injected(tmp_path):
+    """llm/web 注入（测试/演示模式）→ 模型配置只读，变更一律 409。"""
+    server, mgr, base = _start(tmp_path)
+    try:
+        assert mgr.model_registry is None and mgr.web_registry is None
+        d = json.loads(_req(base, "GET", "/api/models")[1])
+        assert d["llm"]["locked"] is True and d["web"]["locked"] is True
+        assert d["llm"]["chain"] == []  # MockResearchLLM 无 providers
+        assert d["web"]["active"] == "mock"
+        assert _req(base, "POST", "/api/models/llm",
+                    {"name": "x", "model": "m"})[0] == 409
+        assert _req(base, "POST", "/api/models/llm/order",
+                    {"order": ["x"]})[0] == 409
+        assert _req(base, "PUT", "/api/models/llm/x", {"model": "m"})[0] == 409
+        assert _req(base, "DELETE", "/api/models/llm/x")[0] == 409
+        assert _req(base, "POST", "/api/models/web",
+                    {"backend": "brave", "key": "k"})[0] == 409
+    finally:
+        server.shutdown()
+        server.server_close()

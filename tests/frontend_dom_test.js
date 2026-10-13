@@ -69,13 +69,33 @@ const tabRP = { dataset: { tab: 'report' }, classList: { toggle(){} } };
 $('tabs').querySelectorAll = (s) => (s === '.tab' ? [tabTL, tabRP] : []);
 const document = { querySelector: (sel) => $(sel), createElement: (t) => makeEl('<' + t + '>') };
 
-// ---- fetch 桩：两个 done 历史任务 + 一个 failed（无检查点）+ 一个 interrupted（有检查点）----
+// ---- fetch 桩：两个 done 历史任务 + 一个 failed（无检查点）+ 一个 interrupted（有检查点）
+//      + 模型配置（GET /api/models + LLM 增删改/重排 + Web key）----
 let resumeCalls = 0;
+const httpCalls = [];   // {method, path, body} 全量记录，供断言
 function fetch(path, opt) {
-  const key = (opt && opt.method === 'POST' ? 'POST ' : 'GET ') + path;
+  const method = (opt && opt.method) || 'GET';
+  httpCalls.push({ method, path, body: opt ? opt.body : undefined });
+  const key = method + ' ' + path;
   const J = (o) => Promise.resolve({ ok: true, headers: { get: () => 'application/json' }, json: () => Promise.resolve(o) });
   const T = (t) => Promise.resolve({ ok: true, headers: { get: () => 'text/markdown' }, text: () => Promise.resolve(t) });
-  if (key.startsWith('GET /api/status')) return J({ llm: 'mock', web: 'mock' });
+  if (key.startsWith('GET /api/status')) return J({ llm: 'primary → fallback', web: 'langsearch+http' });
+  if (key === 'GET /api/models') return J({
+    llm: { chain: [
+      { position: 0, name: 'primary', model: 'glm-5.3', base_url: 'https://x/v1', has_key: true },
+      { position: 1, name: 'fallback', model: 'gpt-4o-mini', base_url: '', has_key: true }], locked: false },
+    web: { active: 'langsearch+http', you_mcp_enabled: true, locked: false, backends: [
+      { name: 'langsearch', kind: 'http', has_key: true, available: true, active: true },
+      { name: 'brave', kind: 'http', has_key: false, available: false, active: false },
+      { name: 'serpapi', kind: 'http', has_key: false, available: false, active: false },
+      { name: 'you-mcp', kind: 'mcp', has_key: null, available: false, active: false },
+      { name: 'mock', kind: 'mock', has_key: null, available: true, active: false }] },
+    persisted: 'storage/models.json' });
+  if (key === 'POST /api/models/llm/order') return J({ chain: [] });
+  if (key === 'POST /api/models/llm') return J({ added: { position: 2, name: 'glm', has_key: true } });
+  if (key.startsWith('PUT /api/models/llm/')) return J({ updated: { name: 'primary', has_key: true } });
+  if (key.startsWith('DELETE /api/models/llm/')) return J({ removed: 'fallback' });
+  if (key === 'POST /api/models/web') return J({ active: 'brave+http', backends: [] });
   if (key.startsWith('GET /api/tasks/A/timeline'))
     return J({ events: [[1, 'task.created', {}], [2, 'llm.called', {}], [3, 'task.completed', {}]], status: 'done' });
   if (key.startsWith('GET /api/tasks/B/timeline'))
@@ -156,6 +176,37 @@ function check(name, cond) { console.log(`${cond ? 'PASS' : 'FAIL'}  ${name}`); 
     check('任务D（interrupted 有检查点）：按钮文案为“恢复运行”',
       els['btn-resume'].style.display !== 'none' && els['btn-resume'].textContent === '恢复运行');
     check('任务D：检查点提示语可见', els['resume-hint'].textContent.includes('检查点'));
+
+    // ---- 模型配置面板：降级链渲染 + 重排 + 添加 ----
+    await tick(30);
+    const chainHtml = els['llm-chain'].children.map(c => c.innerHTML || '').join('');
+    check('模型面板：LLM 降级链两行均渲染（primary/fallback + 模型名）',
+      chainHtml.includes('primary') && chainHtml.includes('glm-5.3') &&
+      chainHtml.includes('fallback') && chainHtml.includes('gpt-4o-mini') &&
+      els['llm-chain'].children.filter(c => c.className === 'model-row').length === 2);
+    // 容器 innerHTML 只有头部提示；行内容是 appendChild 的子元素（桩不序列化子元素）
+    const webHtml = els['web-backends'].innerHTML +
+      els['web-backends'].children.map(c => c.innerHTML || '').join('');
+    check('模型面板：Web 搜索当前后端与 key 输入框渲染',
+      webHtml.includes('langsearch+http') && webHtml.includes('wk-brave'));
+    // 第一行点“↓”（data-act=down）→ POST /api/models/llm/order，order 反转
+    const row0 = els['llm-chain'].children.find(c => c.className === 'model-row');
+    row0.onclick({ target: { dataset: { act: 'down' } }, stopPropagation: () => {} });
+    await tick(30);
+    const orderCall = httpCalls.find(c => c.path === '/api/models/llm/order');
+    check('模型面板：下移主模型发送重排请求 [fallback, primary]',
+      !!orderCall && JSON.parse(orderCall.body).order.join(',') === 'fallback,primary');
+    // 添加模型：填表 → POST /api/models/llm
+    // （$ 惰性建元，与页面代码共用同一实例）
+    $('llm-new-name').value = 'glm';
+    $('llm-new-model').value = 'glm-5.3';
+    $('llm-new-key').value = 'sk-x';
+    click($('btn-llm-add'));
+    await tick(30);
+    const addCall = httpCalls.find(c => c.path === '/api/models/llm');
+    check('模型面板：添加模型发送 POST（name/model/key）',
+      !!addCall && JSON.parse(addCall.body).name === 'glm' &&
+      JSON.parse(addCall.body).key === 'sk-x');
   } catch (e) { stepErr = e; }
   check('无 JS 错误（含未捕获 promise rejection / 点击抛错）',
     errors.length === 0 && !stepErr);

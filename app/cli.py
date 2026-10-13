@@ -7,14 +7,17 @@
 
 后端选择（见 app/config.py）：
 - LLM：RE_EMP_LLM_API_KEY / OPENAI_API_KEY（+ 可选 RE_EMP_LLM_FALLBACK_* 降级链）
-- Web：BRAVE_API_KEY / SERPAPI_API_KEY
+- Web：LANGSEARCH_API_KEY / BRAVE_API_KEY / SERPAPI_API_KEY（或 You.com 免费 MCP）
 - 均未配置 → mock 离线演示模式（打印告警）
+- storage/models.json 存在时覆盖上述环境变量配置（Web 前端「模型配置」
+  面板的持久化产物；CLI 与 Web 服务共用）
 """
 from __future__ import annotations
 
 import argparse
 import json
 import sys
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -22,6 +25,7 @@ from pathlib import Path
 from .config import AppConfig, build_llm, build_web
 from .runtime.budget import Budget
 from .runtime.events import EventStore
+from .runtime.model_registry import ModelRegistry, WebBackendRegistry
 from .runtime.orchestrator import Orchestrator
 from .tools.artifact_store import ArtifactStore
 from .tools.registry import RESEARCHER_WHITELIST, ToolRouter
@@ -39,8 +43,24 @@ def _build_env(storage: Path, limit_subtasks: int | None,
     cfg = AppConfig.from_env()
     events = EventStore(storage / "events.db")
     artifacts = ArtifactStore(storage / "artifacts")
-    llm = build_llm(cfg, verbose=verbose)
-    web = build_web(cfg, storage, verbose=verbose)
+    # storage/models.json（Web 前端模型配置面板的持久化产物）优先于环境变量
+    file_lock = threading.Lock()
+    models = ModelRegistry(cfg.llm_providers,
+                          persist_path=storage / "models.json",
+                          file_lock=file_lock)
+    if models.specs:
+        llm = models.gateway
+        if verbose:
+            print(f"[llm] model-gateway 降级链（storage/models.json）: "
+                  f"{models.description()}")
+    else:
+        llm = build_llm(cfg, verbose=verbose)
+    webreg = WebBackendRegistry(cfg, storage,
+                               persist_path=storage / "models.json",
+                               file_lock=file_lock)
+    web = webreg.backend
+    if verbose:
+        print(f"[web] 当前后端: {web.name}")
     tools = ToolRouter(web, artifacts, RESEARCHER_WHITELIST)
     return events, artifacts, tools, llm, limit_subtasks
 
