@@ -8,7 +8,8 @@ import httpx
 import pytest
 
 from app.tools.fetch_backends import HttpxFetchBackend, html_to_markdown
-from app.tools.search_providers import BraveSearchProvider, SerpApiProvider
+from app.tools.search_providers import (BraveSearchProvider, LangSearchProvider,
+                                       SerpApiProvider)
 from app.tools.registry import ToolRouter
 from app.tools.artifact_store import ArtifactStore
 
@@ -151,6 +152,77 @@ def test_serpapi_provider_parsing():
     assert out == [{"url": "https://c.example", "title": "C", "snippet": "snip"}]
 
 
+_json_dumps = json.dumps  # post() 的 json 参数会遮蔽模块名，模块级先绑定
+
+
+class FakePostHTTP:
+    """LangSearch 是 POST + Bearer 认证，单独一个桩记录请求。"""
+
+    def __init__(self, payload, status=200):
+        self._payload, self._status = payload, status
+        self.requests = []
+
+    def post(self, url, json=None, headers=None, **kw):
+        self.requests.append({"url": url, "json": json, "headers": headers})
+
+        class R:
+            status_code = self._status
+            text = _json_dumps(self._payload)
+            def json(self_inner):
+                return self._payload
+        return R()
+
+
+def test_langsearch_provider_parsing():
+    payload = {
+        "code": 200, "log_id": "req-1", "msg": None,
+        "data": {"_type": "SearchResponse", "webPages": {"value": [
+            {"name": "A", "url": "https://a.example", "snippet": "snip-a",
+             "datePublished": "2026-01-01"},
+            {"name": None, "url": "https://b.example"},
+            {"name": "C", "url": None},
+        ]}},
+        "usage": {"input_tokens": 5, "output_tokens": 15},
+    }
+    fake = FakePostHTTP(payload)
+    out = LangSearchProvider("key", http_client=fake).search("q", limit=3)
+    # url 为 None 的条目跳过；name 缺失 → title 空串
+    assert [r["url"] for r in out] == ["https://a.example", "https://b.example"]
+    assert out[0] == {"url": "https://a.example", "title": "A", "snippet": "snip-a"}
+    assert out[1] == {"url": "https://b.example", "title": "", "snippet": ""}
+    # 请求契约：POST JSON + Bearer 认证
+    req = fake.requests[0]
+    assert req["json"] == {"query": "q", "count": 3}
+    assert req["headers"]["Authorization"] == "Bearer key"
+
+
+def test_langsearch_text_mode_snippet_fallback():
+    """text 模式（snippet 缺省、text 存在）时用 text 前 200 字兜底。"""
+    payload = {"data": {"webPages": {"value": [
+        {"name": "A", "url": "https://a.example",
+         "text": "x" * 500},
+    ]}}}
+    out = LangSearchProvider("key", http_client=FakePostHTTP(payload)).search("q")
+    assert len(out[0]["snippet"]) == 200
+
+
+def test_langsearch_count_clamped_to_api_range():
+    fake = FakePostHTTP({"data": {"webPages": {"value": []}}})
+    LangSearchProvider("key", http_client=fake).search("q", limit=999)
+    assert fake.requests[0]["json"]["count"] == 50
+    LangSearchProvider("key", http_client=fake).search("q", limit=0)
+    assert fake.requests[1]["json"]["count"] == 1
+
+
+def test_langsearch_error_raises_observable():
+    """429/401 等错误 → RuntimeError（ToolRouter 捕获后作为 observation 交回 LLM）。"""
+    fake = FakePostHTTP({"code": "429", "log_id": "x",
+                         "message": "daily allowance exceeded"}, status=429)
+    p = LangSearchProvider("key", http_client=fake)
+    with pytest.raises(RuntimeError, match=r"langsearch: HTTP 429"):
+        p.search("q")
+
+
 class _FailingSearch:
     name = "broken"
     def search(self, query, limit=3):
@@ -175,3 +247,21 @@ class _FailingWeb:
 
     def fetch(self, url):
         return None, "not used"
+
+
+# ---------------------------------------------------------------- build_web 选择
+
+def test_build_web_prefers_langsearch(monkeypatch, tmp_path):
+    from app.config import AppConfig, build_web
+    monkeypatch.setenv("LANGSEARCH_API_KEY", "ls-key")
+    monkeypatch.setenv("BRAVE_API_KEY", "brave-key")  # 优先级低于 LangSearch
+    web = build_web(AppConfig.from_env(), tmp_path, verbose=False)
+    assert web.name == "langsearch+http"
+
+
+def test_build_web_falls_back_to_brave(monkeypatch, tmp_path):
+    from app.config import AppConfig, build_web
+    monkeypatch.delenv("LANGSEARCH_API_KEY", raising=False)
+    monkeypatch.setenv("BRAVE_API_KEY", "brave-key")
+    web = build_web(AppConfig.from_env(), tmp_path, verbose=False)
+    assert web.name == "brave+http"

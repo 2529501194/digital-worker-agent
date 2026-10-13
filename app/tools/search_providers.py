@@ -1,4 +1,4 @@
-"""搜索 Provider（M2）：Brave / SerpApi / Mock，统一 search(query, limit) 接口。
+"""搜索 Provider（M2）：LangSearch / Brave / SerpApi / Mock，统一 search(query, limit) 接口。
 
 HTTP client 可注入 → 离线测试。失败抛异常，由 ToolRouter 捕获后
 作为 observation 交回 LLM 决策（换关键词 / 换来源 / 记 gap）。
@@ -57,6 +57,49 @@ class BraveSearchProvider:
                 continue
             out.append({"url": url, "title": item.get("title", ""),
                         "snippet": item.get("description", "") or ""})
+        return out
+
+
+class LangSearchProvider:
+    """LangSearch Web Search API（langsearch.com，免费每日 token 额度，5 RPS）。
+
+    POST https://api.langsearch.com/v1/web-search
+    Authorization: Bearer <LANGSEARCH_API_KEY>
+    响应：{code, data: {webPages: {value: [{url, name, snippet, ...}]}}, usage}
+    默认 snippet 模式（不请求整页文本）——整页由 web_fetch 负责，
+    避免整页文本挤占 LLM 上下文与每日 token 额度。
+    """
+
+    name = "langsearch"
+
+    def __init__(self, api_key: str, http_client: httpx.Client | None = None,
+                 base_url: str = "https://api.langsearch.com/v1/web-search",
+                 timeout: float = 30.0):
+        self.api_key = api_key
+        self.base_url = base_url
+        self._http = http_client or httpx.Client(timeout=timeout)
+
+    def search(self, query: str, limit: int = 3) -> list[dict]:
+        count = max(1, min(int(limit), 50))  # API 允许 1-50
+        resp = self._http.post(
+            self.base_url,
+            json={"query": query, "count": count},
+            headers={"Authorization": f"Bearer {self.api_key}"},
+        )
+        if resp.status_code != 200:
+            raise RuntimeError(f"langsearch: HTTP {resp.status_code}: {resp.text[:200]}")
+        data = resp.json()
+        pages = ((data.get("data") or {}).get("webPages") or {}).get("value") or []
+        out = []
+        for item in pages[:limit]:
+            url = item.get("url")
+            if not url:
+                continue
+            snippet = item.get("snippet") or ""
+            if not snippet and item.get("text"):  # text 模式下的兜底
+                snippet = item["text"][:200]
+            out.append({"url": url, "title": item.get("name") or "",
+                        "snippet": snippet})
         return out
 
 

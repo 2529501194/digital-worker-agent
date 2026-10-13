@@ -1,7 +1,7 @@
 """搜索与网页抓取工具后端。
 
 - MockWebBackend（M1）：确定性内置语料，离线可测；
-- RealWebBackend（M2）：真实 SearchProvider（Brave/SerpApi）+ HttpxFetchBackend
+- RealWebBackend（M2）：真实 SearchProvider（LangSearch/Brave/SerpApi）+ HttpxFetchBackend
   （httpx 抓取 + HTML→Markdown + 磁盘缓存）。
 两者接口一致：search(query, limit) / fetch(url) / fetch_counts。
 fetch 带缓存与调用计数 —— 崩溃恢复重放时不重复抓同一 URL。

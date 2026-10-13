@@ -8,10 +8,12 @@ LLM（OpenAI 兼容，可配主/备两级降级链）：
     RE_EMP_LLM_FALLBACK_BASE_URL / _API_KEY / _MODEL   （可选降级模型）
 
 Web：
+    LANGSEARCH_API_KEY    → LangSearch 搜索（langsearch.com 免费 API，每日 token 额度）
     BRAVE_API_KEY         → Brave 搜索
     SERPAPI_API_KEY       → SerpApi 搜索
     RE_EMP_WEB=auto|http|mcp|mock
-        auto（默认）：有 Brave/SerpApi key 用真实 http 后端；否则用 You.com 免费 MCP；
+        auto（默认）：有 LangSearch/Brave/SerpApi key 用真实 http 后端
+                      （优先级 LangSearch > Brave > SerpApi）；否则用 You.com 免费 MCP；
                      RE_EMP_YOU_MCP=off 可禁用 MCP，回到纯离线 mock
         mcp：强制 You.com 免费 MCP（api.you.com/mcp?profile=free，无需 key，IP 限流）
     RE_EMP_FETCH_TTL_SECONDS    抓取缓存 TTL（默认 6h）
@@ -45,6 +47,7 @@ class LLMProviderSpec:
 class AppConfig:
     llm_providers: list[LLMProviderSpec] = field(default_factory=list)
     web_mode: str = "auto"          # auto | http | mcp | mock
+    langsearch_key: str | None = None
     brave_key: str | None = None
     serp_key: str | None = None
     you_mcp_enabled: bool = True    # 免费 MCP 搜索（无需 key，IP 限流）
@@ -54,6 +57,7 @@ class AppConfig:
     @classmethod
     def from_env(cls) -> "AppConfig":
         cfg = cls()
+        cfg.langsearch_key = os.environ.get("LANGSEARCH_API_KEY") or None
         cfg.brave_key = os.environ.get("BRAVE_API_KEY") or None
         cfg.serp_key = os.environ.get("SERPAPI_API_KEY") or None
         cfg.web_mode = os.environ.get("RE_EMP_WEB", "auto").lower()
@@ -107,8 +111,12 @@ def build_web(cfg: AppConfig, storage_root: str | Path,
               verbose: bool = True) -> RealWebBackend | MockWebBackend:
     """按 web_mode 与可用 key 选择后端；fetch_cache 落在 storage 下。"""
     cache_dir = cfg.fetch_cache_dir or Path(storage_root) / "fetch_cache"
-    if cfg.web_mode in ("auto", "http") and (cfg.brave_key or cfg.serp_key):
-        if cfg.brave_key:
+    if cfg.web_mode in ("auto", "http") and (cfg.langsearch_key or cfg.brave_key
+                                             or cfg.serp_key):
+        if cfg.langsearch_key:
+            from .tools.search_providers import LangSearchProvider
+            search, src = LangSearchProvider(cfg.langsearch_key), "langsearch"
+        elif cfg.brave_key:
             from .tools.search_providers import BraveSearchProvider
             search, src = BraveSearchProvider(cfg.brave_key), "brave"
         else:
@@ -128,9 +136,9 @@ def build_web(cfg: AppConfig, storage_root: str | Path,
         return web
     if verbose:
         if cfg.web_mode == "http":
-            print("[web] RE_EMP_WEB=http 但缺少 BRAVE_API_KEY/SERPAPI_API_KEY，"
-                  "降级为 mock 搜索")
+            print("[web] RE_EMP_WEB=http 但缺少 LANGSEARCH_API_KEY/"
+                  "BRAVE_API_KEY/SERPAPI_API_KEY，降级为 mock 搜索")
         else:
-            print("[web] mock 搜索/抓取（离线演示模式；配置 BRAVE_API_KEY/"
-                  "SERPAPI_API_KEY 或保持默认启用 You.com MCP）")
+            print("[web] mock 搜索/抓取（离线演示模式；配置 LANGSEARCH_API_KEY/"
+                  "BRAVE_API_KEY/SERPAPI_API_KEY 或保持默认启用 You.com MCP）")
     return MockWebBackend()
