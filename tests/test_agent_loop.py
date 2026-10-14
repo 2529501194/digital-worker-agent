@@ -174,3 +174,13 @@ def test_max_steps_event_persists_summary_gaps(tmp_path):
     ms = [p for _s, t, p in events.replay("t1") if t == "subtask.max_steps"][0]
     assert "达到步数上限" in ms["summary"]
     assert "步数上限" in ms["gaps"]
+
+
+def test_soft_landing_last_step_forces_finish(tmp_path):
+    """最后 1 步强制 finish_subtask（t-dabc6b7b：剩 1 步模型仍可能 read/fetch 撞顶）。"""
+    _e, _a, llm, loop = make_env(tmp_path,
+                                 [act("web_search", query="x")] * 11
+                                 + [act("finish_subtask", summary="done")])
+    loop.run_subtask("t1", "task", {"title": "s", "focus": "f"}, 0, [])
+    assert "这是最后 1 步" in llm.calls[-1]
+    assert "必须调用 finish_subtask" in llm.calls[-1]

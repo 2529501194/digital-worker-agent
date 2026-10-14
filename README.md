@@ -78,7 +78,7 @@ app/config.py                 env 配置 → 组件装配（无 key 降级 mock�
 app/cli.py                    run / resume / timeline
 ```
 
-## 测试（112 项 Python + 16 项前端 DOM，全离线可跑）
+## 测试（113 项 Python + 16 项前端 DOM，全离线可跑）
 
 ```bash
 pytest tests/ -q

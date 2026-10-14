@@ -64,14 +64,24 @@ class AgentLoop:
                     "subtask": subtask_index, "reason": "budget_llm_exhausted"})
                 return SubtaskResult(summary=f"子任务 {subtask_index + 1} 因 LLM 预算耗尽暂停",
                                      steps=step - 1, exhausted=True)
-            if not soft_landed and step >= self.max_steps - 1:
-                # 软着陆：剩最后 2 步时提示收口（先落证据再 finish，不开新搜索）。
+            remaining = self.max_steps - step + 1
+            if step >= self.max_steps - 1 and (remaining == 1 or not soft_landed):
+                # 软着陆：剩最后 2 步提示收口（先落证据再 finish，不开新搜索）；
+                # 最后 1 步即使已提示过也要再注入强制收口（模型可能无视弱提示）。
                 # t-59d18668：三个子任务全部 max_steps 收尾，writer 拿不到
                 # 子任务结论，报告质量受损；给模型一个明确的收口时机。
-                scratch.append(
-                    f"SOFT_LANDING: 步数即将用尽（剩 {self.max_steps - step + 1} 步）。"
-                    "请立即：1) 用 write_artifact 把已收集的材料落盘为证据；"
-                    "2) 用 finish_subtask 提交一句话结论收尾；不要再发起新的搜索/抓取。")
+                if remaining > 1:
+                    scratch.append(
+                        f"SOFT_LANDING: 步数即将用尽（剩 {remaining} 步）。"
+                        "请立即：1) 用 write_artifact 把已收集的材料落盘为证据；"
+                        "2) 用 finish_subtask 提交一句话结论收尾；不要再发起新的搜索/抓取。")
+                else:
+                    # t-dabc6b7b：剩 1 步时模型仍可能发起 read/fetch 而撞顶，
+                    # 收尾语退化成模板句——最后一步强制收口
+                    scratch.append(
+                        "SOFT_LANDING: 这是最后 1 步，必须调用 finish_subtask 收尾"
+                        "（提交一句话结论 + gaps）；若证据未落盘可先 write_artifact，"
+                        "之后立即 finish_subtask，不要再调用其他工具。")
                 soft_landed = True
             ctx = build_context("EXECUTE", task, subtask=subtask,
                                 scratch=list(scratch))
