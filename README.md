@@ -74,13 +74,14 @@ app/config.py                 env 配置 → 组件装配（无 key 降级 mock�
 app/cli.py                    run / resume / timeline
 ```
 
-## 测试（64 项 Python + 16 项前端 DOM，全离线可跑）
+## 测试（85 项 Python + 16 项前端 DOM，全离线可跑）
 
 ```bash
 pytest tests/ -q
 ```
 
 - `test_agent_loop.py` — 解析失败恢复、工具错误观察、步数/预算护栏
+- `test_actions.py` — JSON 提取健壮性：括号平衡取第一个完整对象（多 JSON / 后随杂文 / 字符串内花括号 / 转义），回归贪婪正则 `\\{.*\\}` 跨对象过度匹配缺陷（PLAN 提取共用同一实现）
 - `test_orchestrator.py` — 端到端研究任务、幂等重跑、预算收尾
 - `test_recovery.py` — kill 模拟断点续跑、外部调用不重复
 - `test_llm_gateway.py` — 重试/退避、401 不重试、降级链、熔断生命周期、读超时窗口翻倍救慢模型、token 预算、plan_limit

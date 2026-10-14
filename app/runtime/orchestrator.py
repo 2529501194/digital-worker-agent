@@ -44,12 +44,16 @@ WRITE_PROMPT = (
 
 
 def _extract_json(raw: str):
-    """从 LLM 输出中提取第一个 JSON 对象（容忍 markdown 围栏与前后杂文）。"""
-    import re as _re
-    m = _re.search(r"\{.*\}", raw, _re.S)
-    if m is None:
-        raise ValueError(f"LLM 输出中未找到 JSON: {raw[:120]!r}")
-    return json.loads(m.group(0))
+    """从 LLM 输出中提取第一个可解析 JSON 对象（容忍 markdown 围栏与前后杂文）。
+
+    括号平衡提取（actions.first_json_object）：模型输出多个 JSON / 后随杂文时
+    只取第一个完整对象——旧贪婪正则 r"\\{.*\\}" 会跨对象过度匹配而失败。
+    """
+    from .actions import first_json_object
+    try:
+        return first_json_object(raw)
+    except ValueError as e:
+        raise ValueError(f"LLM 输出中无有效 JSON（{e}）") from e
 
 
 class _SimulatedCrash(Exception):

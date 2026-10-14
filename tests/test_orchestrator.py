@@ -179,3 +179,25 @@ def test_plan_json_with_markdown_fences(tmp_path):
     assert outcome.status == "done" and outcome.total_subtasks == 1
     report = Path(outcome.report_path).read_text(encoding="utf-8")
     assert report.startswith("# 研究报告")
+
+
+def test_plan_json_with_trailing_extra_json(tmp_path):
+    """回归：贪婪正则 r"\{.*\}" 会从第一个 { 匹配到最后一个 }。
+
+    PLAN 输出“围栏 JSON + 后随第二个 JSON 对象”（GLM 系列常见）时旧实现
+    必然 Extra data 失败；新实现按括号平衡只取第一个完整对象。
+    """
+    from app.runtime.orchestrator import _extract_json
+    raw = ('```json\n'
+           '{"subtasks": [{"title": "A", "focus": "a"}]}\n'
+           '```\n补充维度：{"compare_dimensions": ["价格", "份额"]}')
+    obj = _extract_json(raw)
+    assert obj["subtasks"] == [{"title": "A", "focus": "a"}]
+
+    # 后随杂文含 } 也不再拉爆范围
+    obj2 = _extract_json('计划 {"subtasks": []} 说明：{占位} 结束')
+    assert obj2 == {"subtasks": []}
+
+    import pytest
+    with pytest.raises(ValueError, match="无有效 JSON"):
+        _extract_json("没有 JSON 的输出")
