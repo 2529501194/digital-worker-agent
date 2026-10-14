@@ -106,3 +106,48 @@ def test_system_prompt_documents_tool_args():
     for key in ('"query"', '"url"', '"content"', '"refs"', '"id"', '"summary"'):
         assert key in SYSTEM_PROMPT, f"参数表缺少 {key}"
     assert "不要原样重试" in SYSTEM_PROMPT
+
+
+# ---- 时间线复盘 t-a58c3f76 回归：顶层丢参 + 退化循环 + 诊断可见性 ----
+
+def test_top_level_args_merged(tmp_path):
+    """模型把 query 写在顶层（不进 args）→ 解析器合并进 args，工具正常执行。
+
+    t-a58c3f76：41/47 次 web_search 因此静默丢参失败，模型反复重试同一结构。
+    """
+    events, _a, _llm, loop = make_env(tmp_path, [
+        '{"action":"web_search","query":"随机森林 优缺点"}',
+        act("finish_subtask", summary="done"),
+    ])
+    r = loop.run_subtask("t1", "task", {"title": "s", "focus": "f"}, 0, [])
+    assert not r.exhausted and r.summary == "done"
+    tool_ev = [p for _s, t, p in events.replay("t1") if t == "tool.called"][0]
+    assert tool_ev["ok"] and tool_ev["args"]["query"] == "随机森林 优缺点"
+
+
+def test_repeat_fail_guard_breaks_degenerate_loop(tmp_path):
+    """同一失败调用重复 → 第 2 次失败即注入 REPEAT_FAIL 换路提示（进 scratch/上下文）。"""
+    _e, _a, llm, loop = make_env(tmp_path, [
+        act("web_search"), act("web_search"), act("web_search"),
+        act("finish_subtask", summary="ok"),
+    ])
+    scratch = []
+    loop.run_subtask("t1", "task", {"title": "s", "focus": "f"}, 0, scratch)
+    assert any("REPEAT_FAIL" in s for s in scratch)
+    assert "REPEAT_FAIL" in llm.calls[2]  # 第 3 轮上下文模型实际可见
+
+
+def test_max_steps_without_evidence_flagged(tmp_path):
+    """max_steps 收尾且全程零 write_artifact → summary/gaps 明示「未写入证据」。"""
+    _e, _a, _llm, loop = make_env(tmp_path, [act("web_search", query="x")] * 13)
+    r = loop.run_subtask("t1", "task", {"title": "s", "focus": "f"}, 0, [])
+    assert r.steps == 12 and r.steps == loop.max_steps  # 确实撞顶
+    assert "未写入任何证据工件" in r.summary and "未写入证据" in r.gaps
+
+
+def test_llm_called_event_records_raw_head(tmp_path):
+    """llm.called 事件带原文前 300 字符（静默丢参问题在事件流里可见）。"""
+    events, _a, _llm, loop = make_env(tmp_path, [act("finish_subtask", summary="done")])
+    loop.run_subtask("t1", "task", {"title": "s", "focus": "f"}, 0, [])
+    llm_ev = [p for _s, t, p in events.replay("t1") if t == "llm.called"][0]
+    assert "finish_subtask" in llm_ev["raw_head"]

@@ -319,3 +319,33 @@ def test_write_timeout_passed_to_provider(tmp_path):
     assert [t for _, t in write_calls] == [270]  # 仅 WRITE 一次
     non_write = [t for s, t in probe.calls if t is None]
     assert len(non_write) >= 2  # PLAN + EXECUTE 若干次，均用 provider 默认
+
+
+def test_write_zero_evidence_disclaimer(tmp_path):
+    """零证据工件 → WRITE 上下文明示「缺乏一手证据」边界（t-a58c3f76 回归：
+    全程未调 write_artifact，报告 2.6k 字符塌方且引用无任务内依据）。"""
+    import json as _json
+    seen: dict = {}
+
+    class _FinishNowLLM:
+        name = "finish-now"
+        last_meta = None
+
+        def complete(self, system, user, timeout=None):
+            if "STAGE: PLAN" in user:
+                return _json.dumps({"subtasks": [{"title": "A", "focus": "a"}]})
+            if "STAGE: WRITE" in user:
+                seen["write_ctx"] = user
+                return "本报告缺乏一手证据\n\n# 报告\n内容\n"
+            return _json.dumps({"action": "finish_subtask",
+                                "args": {"summary": "done"}})
+
+    storage = tmp_path / "storage"
+    events = EventStore(storage / "events.db")
+    artifacts = ArtifactStore(storage / "artifacts")
+    orch = Orchestrator("t-ze", PROMPT, _FinishNowLLM(),
+                        ToolRouter(MockWebBackend(), artifacts), events,
+                        artifacts, Budget(), storage / "reports")
+    assert orch.run().status == "done"
+    assert "没有写入任何证据工件" in seen["write_ctx"]
+    assert "严禁凭记忆编造链接" in seen["write_ctx"]

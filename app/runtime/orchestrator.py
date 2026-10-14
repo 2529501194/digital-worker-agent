@@ -238,6 +238,13 @@ class Orchestrator:
             ctx += ("\nALLOWED_URLS（参考文献只能逐字使用以下 URL，"
                     "其他任何链接都视为编造）:\n"
                     + "\n".join(f"- {u}" for u in allowed) + "\n")
+        if not evidence:
+            # 零证据降级提示（t-a58c3f76：全程未调 write_artifact，报告全靠
+            # 模型自身知识，质量塌方且引用无任务内依据）——明示 LLM 降级边界
+            ctx += ("\n注意：本任务没有写入任何证据工件（write_artifact 未被调用），"
+                    "报告只能基于研究计划与模型自身知识生成，内容缺乏任务内证据支撑；"
+                    "参考文献只允许使用上方 ALLOWED_URLS（本任务实际抓取过的 URL），"
+                    "严禁凭记忆编造链接，并在报告开头注明“本报告缺乏一手证据”。\n")
         dims = self._plan_dimensions()
         dims_line = ("、".join(dims) if dims
                      else "计划未指定时，自行选择最贴合研究主题的 2-3 个维度")

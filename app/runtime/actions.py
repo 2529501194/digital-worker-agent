@@ -11,6 +11,13 @@ from dataclasses import dataclass, field
 VALID_ACTIONS = {"web_search", "web_fetch", "read_artifact", "write_artifact",
                  "list_artifacts", "finish_subtask"}
 
+# 模型常把参数写到顶层（{"action":"web_search","query":"..."}）；
+# parse_action 只读 obj["args"] 会静默丢弃 → args={} → 工具报“缺少 query”，
+# 模型没意识到参数丢了会反复重试同一结构（时间线 t-a58c3f76：41/47 次
+# web_search 因此失败，0 次 write_artifact，报告质量塌方）。容忍并合并。
+TOP_LEVEL_ARG_KEYS = ("query", "q", "keyword", "url", "link", "href", "type", "title",
+                     "content", "refs", "id", "artifact_id", "path", "summary", "gaps")
+
 
 class ActionParseError(Exception):
     pass
@@ -91,4 +98,9 @@ def parse_action(raw: str) -> Action:
     args = obj.get("args") or {}
     if not isinstance(args, dict):
         raise ActionParseError("args 必须是对象")
+    args = dict(args)
+    # 顶层参数容忍：已知参数键写在顶层时合并进 args（显式 args 优先）
+    for k in TOP_LEVEL_ARG_KEYS:
+        if k not in args and k in obj:
+            args[k] = obj[k]
     return Action(name, args)

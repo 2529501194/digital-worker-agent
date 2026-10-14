@@ -49,3 +49,26 @@ def test_web_fetch_missing_url_still_reported(tmp_path):
     router, _ = _router(tmp_path)
     r = router.run("t1", "web_fetch", {})
     assert not r.ok and "缺少 url" in r.error
+
+
+def test_web_search_aliases(tmp_path):
+    """搜索词常见别名（q/keyword）也能命中。"""
+    router, _ = _router(tmp_path)
+    for alias in ("query", "q", "keyword"):
+        r = router.run("t1", "web_search", {alias: "随机森林"})
+        assert r.ok, f"别名 {alias} 未生效"
+
+
+def test_web_search_missing_query_shows_correct_example(tmp_path):
+    """空 query 报错必须可操作：给出正确调用示例（模型一步自纠）。"""
+    router, _ = _router(tmp_path)
+    r = router.run("t1", "web_search", {})
+    assert not r.ok
+    assert "正确写法" in r.scratch and '"query"' in r.scratch
+
+
+def test_web_fetch_missing_url_shows_correct_example(tmp_path):
+    router, _ = _router(tmp_path)
+    r = router.run("t1", "web_fetch", {})
+    assert not r.ok
+    assert "正确写法" in r.scratch and '"url"' in r.scratch

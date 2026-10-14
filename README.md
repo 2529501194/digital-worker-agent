@@ -78,17 +78,17 @@ app/config.py                 env 配置 → 组件装配（无 key 降级 mock�
 app/cli.py                    run / resume / timeline
 ```
 
-## 测试（100 项 Python + 16 项前端 DOM，全离线可跑）
+## 测试（108 项 Python + 16 项前端 DOM，全离线可跑）
 
 ```bash
 pytest tests/ -q
 ```
 
-- `test_agent_loop.py` — 解析失败恢复、工具错误观察、步数/预算护栏、SYSTEM_PROMPT 工具参数表完整性（防模型盲猜参数名）
-- `test_tools.py` — read_artifact 空 id 明确报错 / 参数别名（path、artifact_id）/ 未知 id 时列出可用工件（时间线复盘 t-eb3dbd0f 回归）
+- `test_agent_loop.py` — 解析失败恢复、工具错误观察、步数/预算护栏、SYSTEM_PROMPT 工具参数表完整性；顶层参数合并端到端、REPEAT_FAIL 退化循环护栏（同参失败 2 次即强提示换路）、max_steps 零证据明示、llm.called 带 raw_head 原文片段（t-a58c3f76 回归）
+- `test_tools.py` — read_artifact 空 id 明确报错 / 参数别名（path、artifact_id）/ 未知 id 时列出可用工件；web_search 别名（q、keyword）/ web_fetch 别名（link、href）；缺参报错带正确调用示例（t-eb3dbd0f / t-a58c3f76 回归）
 - `test_config.py` — Agent 运行时参数默认值 / env 覆盖 / 下限保护（agent_max_steps、write_evidence_chars、llm_write_timeout）
-- `test_actions.py` — JSON 提取健壮性：括号平衡取第一个完整对象（多 JSON / 后随杂文 / 字符串内花括号 / 转义），回归贪婪正则 `\\{.*\\}` 跨对象过度匹配缺陷（PLAN 提取共用同一实现）
-- `test_orchestrator.py` — 端到端研究任务、幂等重跑、预算收尾、max_steps 透传、WRITE 证据截断字符数、WRITE 读超时透传至 provider（旧式两参 LLM 回退兼容）
+- `test_actions.py` — JSON 提取健壮性：括号平衡取第一个完整对象（多 JSON / 后随杂文 / 字符串内花括号 / 转义），回归贪婪正则 `\\{.*\\}` 跨对象过度匹配缺陷（PLAN 提取共用同一实现）；顶层参数容忍（模型把 query 写顶层时合并进 args，t-a58c3f76 回归）
+- `test_orchestrator.py` — 端到端研究任务、幂等重跑、预算收尾、max_steps 透传、WRITE 证据截断字符数、WRITE 读超时透传至 provider（旧式两参 LLM 回退兼容）、零证据 WRITE 降级提示（禁编造链接）
 - `test_recovery.py` — kill 模拟断点续跑、外部调用不重复
 - `test_llm_gateway.py` — 重试/退避、401 不重试、降级链、熔断生命周期、读超时窗口翻倍救慢模型、`timeout=` 覆盖窗口并跟随重试翻倍、token 预算、plan_limit
 - `test_web_real.py` — 本地 HTTP server 验证真实抓取链路（HTML→MD、404、磁盘缓存防重复抓取、断网优雅降级）、LangSearch/Brave/SerpApi 响应解析与 build_web 优先级

@@ -47,10 +47,14 @@ class ToolRouter:
 
     # ---- 工具实现 ----
     def _web_search(self, task_id: str, args: dict, subtask: int | None) -> ToolResult:
-        query = (args.get("query") or "").strip()
+        # 参数别名：模型常把搜索词写成 q/keyword（与 read_artifact 的别名同一思路）
+        query = str(args.get("query") or args.get("q") or args.get("keyword") or "").strip()
         if not query:
-            return ToolResult(ok=False, error="web_search 缺少 query",
-                              scratch='web_search => ERROR 缺少 query')
+            return ToolResult(
+                ok=False, error="web_search 缺少 query 参数",
+                scratch=('web_search => ERROR 缺少 query 参数。'
+                         '正确写法：{"action":"web_search","args":{"query":"<具体搜索词>"}}，'
+                         '参数必须放在 args 对象内，不要把 query 写在顶层或留空'))
         try:
             results = self.web.search(query, limit=int(args.get("limit", 3)))
         except Exception as e:  # 真实搜索 API 失败 → 错误交回 LLM 决策，不终止循环
@@ -67,10 +71,13 @@ class ToolRouter:
                           scratch=line)
 
     def _web_fetch(self, task_id: str, args: dict, subtask: int | None) -> ToolResult:
-        url = (args.get("url") or "").strip()
+        url = str(args.get("url") or args.get("link") or args.get("href") or "").strip()
         if not url:
-            return ToolResult(ok=False, error="web_fetch 缺少 url",
-                              scratch="web_fetch => ERROR 缺少 url")
+            return ToolResult(
+                ok=False, error="web_fetch 缺少 url 参数",
+                scratch=('web_fetch => ERROR 缺少 url 参数。'
+                         '正确写法：{"action":"web_fetch","args":{"url":"<完整 URL>"}}，'
+                         'URL 取自 web_search 结果或证据工件 refs'))
         content, err = self.web.fetch(url)
         if err:
             return ToolResult(ok=False, error=err,

@@ -26,7 +26,9 @@ SYSTEM_PROMPT = (
     '列出的 id，如 E-1）"}\n'
     '- list_artifacts: {} 或 {"type": "evidence"}\n'
     '- finish_subtask: {"summary": "本子任务一句话结论"}\n'
-    "依据 SCRATCH 中已完成的步骤决定下一步；证据必须写入工件并带 refs。\n"
+    "参数必须写在 args 对象内（不要写在顶层）；query/url 等必填参数不得留空。\n"
+    "依据 SCRATCH 中已完成的步骤决定下一步；搜到材料后尽快用 write_artifact 把证据落盘"
+    "（带 refs），不要一直搜索。证据必须写入工件并带 refs。\n"
     "工具返回 ERROR 时修正参数或换工具继续，不要原样重试同一个失败调用。"
 )
 
@@ -51,7 +53,10 @@ class AgentLoop:
 
     def run_subtask(self, task_id: str, task: str, subtask: dict,
                     subtask_index: int, scratch: list[str]) -> SubtaskResult:
+        import json as _json
         parse_fails = 0
+        failed_sigs: dict[str, int] = {}   # 同参失败调用计数（退化循环护栏）
+        wrote_evidence = False
         for step in range(1, self.max_steps + 1):
             if not self.budget.can_call_llm():
                 self.events.append(task_id, "subtask.paused", {
@@ -99,11 +104,29 @@ class AgentLoop:
                 "ok": result.ok, "error": result.error,
                 "result": result.data, "scratch": result.scratch})
             scratch.append(result.scratch)
+            if action.name == "write_artifact" and result.ok:
+                wrote_evidence = True
+            if not result.ok:
+                sig = (action.name, _json.dumps(action.args, sort_keys=True,
+                                               ensure_ascii=False, default=str))
+                failed_sigs[sig] = failed_sigs.get(sig, 0) + 1
+                if failed_sigs[sig] >= 2:
+                    # 退化循环护栏：同一失败调用第二次出现即强提示换路
+                    scratch.append(
+                        "REPEAT_FAIL: 你已用完全相同的参数失败 "
+                        f"{failed_sigs[sig]} 次（{action.name} args={action.args}）。"
+                        "检查必填参数是否真的写进了 args 对象（对照参数表），"
+                        "换搜索词/换工具/先 list_artifacts 查 id；材料足够时立即用 "
+                        "write_artifact 落证据，不要再重复这个失败调用。")
             # 观察（observation）已写回 scratch；失败时 LLM 下一轮可见错误并自行换路
 
         self.events.append(task_id, "subtask.max_steps", {"subtask": subtask_index})
-        return SubtaskResult(summary=f"子任务 {subtask_index + 1} 达到步数上限收尾",
-                            gaps=["步数上限"], steps=self.max_steps)
+        gaps = ["步数上限"]
+        summary = f"子任务 {subtask_index + 1} 达到步数上限收尾"
+        if not wrote_evidence:
+            gaps.append("未写入证据")
+            summary += "，且全程未写入任何证据工件（write_artifact）"
+        return SubtaskResult(summary=summary, gaps=gaps, steps=self.max_steps)
 
     def _record_llm_call(self, task_id: str, stage: str,
                          subtask: int | None, step: int, raw: str) -> None:
@@ -114,6 +137,9 @@ class AgentLoop:
             "model": meta.model if meta else self.llm.name,
             "provider": meta.provider if meta else self.llm.name,
             "chars": len(raw),
+            # 原文前 300 字符：排障时可直接看到模型实际输出（参数写顶层/留空等
+            # 静默丢参问题在事件流里不可见，是 t-a58c3f76 复盘的关键缺口）
+            "raw_head": raw[:300],
         }
         if meta is not None:
             payload.update({"tokens_in": meta.tokens_in, "tokens_out": meta.tokens_out,
