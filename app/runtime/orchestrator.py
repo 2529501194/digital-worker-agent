@@ -34,10 +34,14 @@ PLAN_PROMPT = (
 )
 
 WRITE_PROMPT = (
-    "你是研究报告撰写引擎。基于上下文中的研究计划与全部证据工件，"
+    "你是研究报告撰写引擎。基于上下文中的研究计划、子任务结论与全部证据工件，"
     "直接输出完整的 Markdown 研究报告（不要 JSON、不要 markdown 围栏）：\n"
-    "1) 概述；2) 每个研究对象的独立小节，论断必须引用证据编号与 URL；"
-    "3) 对比分析（维度：{dims}）；4) 参考文献列表。\n"
+    "1) 概述；2) 每个研究对象的独立小节；3) 对比分析（维度：{dims}）；4) 参考文献列表。\n"
+    "行文要求：用连贯的论述性段落写，把多篇证据综合成一个完整论述；"
+    "同一论断被多篇证据支持时合并表述并去重，不要逐条转录证据的分点列表；"
+    "证据不足以支撑的论断可结合模型知识补充，但须在参考文献可溯源的范围内。\n"
+    "引用要求：正文引用用文末参考文献的序号（如 [1][2]）；"
+    "严禁在正文出现 [E-1] 这类内部证据编号（读者无法对应）。\n"
     "硬性要求：参考文献只能使用“证据工件”里出现过的 URL，严禁编造或臆测链接；"
     "某对象没有证据时就如实标注“证据不足”，不得用占位 URL 凑数。"
 )
@@ -245,11 +249,16 @@ class Orchestrator:
                     "报告只能基于研究计划与模型自身知识生成，内容缺乏任务内证据支撑；"
                     "参考文献只允许使用上方 ALLOWED_URLS（本任务实际抓取过的 URL），"
                     "严禁凭记忆编造链接，并在报告开头注明“本报告缺乏一手证据”。\n")
+        concl = self._subtask_conclusions()
+        if concl:
+            ctx += ("\nSUBTASK_CONCLUSIONS（各子任务收尾结论，写报告时优先参考；"
+                    "有 gap 的对象在报告中如实标注）:\n" + concl + "\n")
         dims = self._plan_dimensions()
         dims_line = ("、".join(dims) if dims
                      else "计划未指定时，自行选择最贴合研究主题的 2-3 个维度")
         raw = self._llm_call("WRITE", WRITE_PROMPT.format(dims=dims_line), ctx,
                              timeout=self.write_timeout)
+        raw = self._strip_internal_ids(raw)
         raw = self._verify_citations(raw, evidence)
 
         self.report_dir.mkdir(parents=True, exist_ok=True)
@@ -264,6 +273,34 @@ class Orchestrator:
         return RunOutcome(status="done", report_path=str(report_path),
                           completed_subtasks=len(plan), total_subtasks=len(plan),
                           gaps=[])
+
+    def _subtask_conclusions(self) -> str:
+        """从事件流重建各子任务结论（崩溃恢复后仍在）：
+
+        finished → 模型 summary + gaps；max_steps → 收尾语 + gaps（事件已持久化）。
+        writer 此前只拿到 plan 标题 + 证据，子任务结论完全丢失（t-59d18668 复盘）。
+        """
+        lines = []
+        for _s, t, p in self.events.replay(self.task_id):
+            if t == "subtask.finished":
+                gaps = p.get("gaps") or []
+                lines.append(f"- 子任务 {p.get('subtask', 0) + 1}：{p.get('summary','') or '（无结论）'}"
+                             + (f"；未覆盖: {'、'.join(gaps)}" if gaps else ""))
+            elif t == "subtask.max_steps":
+                i = p.get("subtask", 0)
+                summary = p.get("summary") or f"子任务 {i + 1} 达到步数上限收尾"
+                gaps = p.get("gaps") or ["步数上限"]
+                lines.append(f"- {summary}；未覆盖: {'、'.join(gaps)}")
+            elif t == "subtask.aborted":
+                lines.append(f"- 子任务 {p.get('subtask', 0) + 1} 中止：{p.get('reason','')}）")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _strip_internal_ids(report: str) -> str:
+        """清除泄漏进正文的内部证据编号 [E-1]（t-59d18668：读者无法对应，
+        且与文末 1..N 参考文献编号体系冲突）；提示词已禁，这里是兜底。"""
+        import re as _re
+        return _re.sub(r"\[E-\d+\]", "", report)
 
     # ------------------------------------------------- 引用校验（最小 SELF-CHECK）
     def _known_urls(self, evidence: list[dict]) -> set[str]:

@@ -151,3 +151,26 @@ def test_llm_called_event_records_raw_head(tmp_path):
     loop.run_subtask("t1", "task", {"title": "s", "focus": "f"}, 0, [])
     llm_ev = [p for _s, t, p in events.replay("t1") if t == "llm.called"][0]
     assert "finish_subtask" in llm_ev["raw_head"]
+
+
+def test_soft_landing_near_max_steps(tmp_path):
+    """剩最后 2 步注入 SOFT_LANDING 收口提示（先落证据再 finish，不开新搜索）。
+
+    t-59d18668：三个子任务全部 max_steps 收尾，writer 拿不到子任务结论。
+    """
+    _e, _a, llm, loop = make_env(tmp_path,
+                                 [act("web_search", query="x")] * 11
+                                 + [act("finish_subtask", summary="done")])
+    r = loop.run_subtask("t1", "task", {"title": "s", "focus": "f"}, 0, [])
+    assert not r.exhausted and r.summary == "done"
+    # max_steps=12：第 11/12 步（llm.calls[10]/[11]）的上下文含收口提示
+    assert any("SOFT_LANDING" in c for c in llm.calls[10:])
+
+
+def test_max_steps_event_persists_summary_gaps(tmp_path):
+    """subtask.max_steps 事件持久化 summary/gaps（writer 与崩溃恢复后可重建结论）。"""
+    events, _a, _llm, loop = make_env(tmp_path, [act("web_search", query="x")] * 13)
+    loop.run_subtask("t1", "task", {"title": "s", "focus": "f"}, 0, [])
+    ms = [p for _s, t, p in events.replay("t1") if t == "subtask.max_steps"][0]
+    assert "达到步数上限" in ms["summary"]
+    assert "步数上限" in ms["gaps"]

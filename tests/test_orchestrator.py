@@ -349,3 +349,35 @@ def test_write_zero_evidence_disclaimer(tmp_path):
     assert orch.run().status == "done"
     assert "没有写入任何证据工件" in seen["write_ctx"]
     assert "严禁凭记忆编造链接" in seen["write_ctx"]
+
+
+def test_write_ctx_includes_subtask_conclusions(tmp_path):
+    """WRITE 上下文注入各子任务结论（t-59d18668：writer 此前只有 plan 标题+证据）。"""
+    storage = tmp_path / "storage"
+    events = EventStore(storage / "events.db")
+    artifacts = ArtifactStore(storage / "artifacts")
+    llm = _RecordingLLM()
+    orch = Orchestrator("t-concl", PROMPT, llm,
+                        ToolRouter(MockWebBackend(), artifacts), events,
+                        artifacts, Budget(), storage / "reports")
+    assert orch.run().status == "done"
+    write_ctx = [c for c in llm.ctxs if "STAGE: WRITE" in c][0]
+    assert "SUBTASK_CONCLUSIONS" in write_ctx
+    assert "Claude Code 架构调研" in write_ctx  # mock 的子任务结论原文
+
+
+def test_write_strips_leaked_internal_ids(tmp_path):
+    """正文泄漏的内部证据编号 [E-1] 落盘前清除（t-59d18668 回归：读者无法对应）。"""
+    class _LeakyWriteLLM(_TwoArgLLM):
+        def complete(self, system, user):
+            if "STAGE: WRITE" in user:
+                return ("# 报告\n\n线性回归简单可解释 [E-1]，K-means 高效 [E-3]。\n"
+                        "参考文献\n1. https://a.example/1\n")
+            return super().complete(system, user)
+
+    orch, _ = _make_orch_with(tmp_path, "t-strip", _LeakyWriteLLM())
+    out = orch.run()
+    report = (tmp_path / "storage" / "reports" / "t-strip.md").read_text(encoding="utf-8")
+    assert out.status == "done"
+    assert "[E-" not in report
+    assert "线性回归简单可解释" in report  # 正文保留，只删编号

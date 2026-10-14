@@ -57,12 +57,22 @@ class AgentLoop:
         parse_fails = 0
         failed_sigs: dict[str, int] = {}   # 同参失败调用计数（退化循环护栏）
         wrote_evidence = False
+        soft_landed = False
         for step in range(1, self.max_steps + 1):
             if not self.budget.can_call_llm():
                 self.events.append(task_id, "subtask.paused", {
                     "subtask": subtask_index, "reason": "budget_llm_exhausted"})
                 return SubtaskResult(summary=f"子任务 {subtask_index + 1} 因 LLM 预算耗尽暂停",
                                      steps=step - 1, exhausted=True)
+            if not soft_landed and step >= self.max_steps - 1:
+                # 软着陆：剩最后 2 步时提示收口（先落证据再 finish，不开新搜索）。
+                # t-59d18668：三个子任务全部 max_steps 收尾，writer 拿不到
+                # 子任务结论，报告质量受损；给模型一个明确的收口时机。
+                scratch.append(
+                    f"SOFT_LANDING: 步数即将用尽（剩 {self.max_steps - step + 1} 步）。"
+                    "请立即：1) 用 write_artifact 把已收集的材料落盘为证据；"
+                    "2) 用 finish_subtask 提交一句话结论收尾；不要再发起新的搜索/抓取。")
+                soft_landed = True
             ctx = build_context("EXECUTE", task, subtask=subtask,
                                 scratch=list(scratch))
             raw = self.llm.complete(SYSTEM_PROMPT, ctx)
@@ -120,12 +130,15 @@ class AgentLoop:
                         "write_artifact 落证据，不要再重复这个失败调用。")
             # 观察（observation）已写回 scratch；失败时 LLM 下一轮可见错误并自行换路
 
-        self.events.append(task_id, "subtask.max_steps", {"subtask": subtask_index})
         gaps = ["步数上限"]
         summary = f"子任务 {subtask_index + 1} 达到步数上限收尾"
         if not wrote_evidence:
             gaps.append("未写入证据")
             summary += "，且全程未写入任何证据工件（write_artifact）"
+        # summary/gaps 持久化进事件：writer（含崩溃恢复后）可重建子任务结论
+        self.events.append(task_id, "subtask.max_steps",
+                          {"subtask": subtask_index, "summary": summary,
+                           "gaps": gaps})
         return SubtaskResult(summary=summary, gaps=gaps, steps=self.max_steps)
 
     def _record_llm_call(self, task_id: str, stage: str,
