@@ -63,7 +63,11 @@ class OpenAICompatibleProvider:
         self._sleep = sleep_fn
         self._http = http_client or httpx.Client(timeout=timeout)
 
-    def complete(self, system: str, user: str) -> tuple[str, CallMeta]:
+    def complete(self, system: str, user: str,
+                 timeout: float | None = None) -> tuple[str, CallMeta]:
+        """timeout：本次调用的读超时基础窗口（覆盖实例默认 self.timeout）；
+        重试翻倍逻辑不变（基础 ×2，上限 2x）。供 WRITE 等长生成阶段放宽。"""
+        base = timeout if timeout is not None else self.timeout
         payload = {
             "model": self.model,
             "messages": [
@@ -85,7 +89,7 @@ class OpenAICompatibleProvider:
                 # 而生成不可续传——重试只能靠更长的窗口救回来。
                 resp = self._http.post(
                     f"{self.base_url}/chat/completions", json=payload, headers=headers,
-                    timeout=self.timeout * (2 if attempt > 0 else 1))
+                    timeout=base * (2 if attempt > 0 else 1))
                 latency_ms = round((time.monotonic() - t0) * 1000, 1)
 
                 if resp.status_code in _RETRYABLE_STATUS:
@@ -115,7 +119,7 @@ class OpenAICompatibleProvider:
                     # 直接给出调参出口，避免用户对着“网络错误”排查
                     raise LLMError(
                         f"{self.name}: 读超时重试耗尽（{type(e).__name__}；模型生成可能"
-                        f"超过 {int(self.timeout * 2)}s 窗口——调大 RE_EMP_LLM_TIMEOUT "
+                        f"超过 {int(base * 2)}s 窗口——调大 RE_EMP_LLM_TIMEOUT "
                         f"或换更快的模型/降级模型）", retryable=True) from e
                 last_err = str(e)
                 self._sleep(self.backoff_base * (2 ** attempt)
@@ -183,7 +187,11 @@ class ModelGateway:
         self.last_meta: CallMeta | None = None
         self.last_errors: list[str] = []
 
-    def complete(self, system: str, user: str) -> str:
+    def complete(self, system: str, user: str,
+                 timeout: float | None = None) -> str:
+        """timeout：本次调用的读超时基础窗口（透传给 provider）；
+        None 时各 provider 用自身默认。仅真实 provider 支持该参数，
+        mock/测试 fake 保持两参签名不受影响。"""
         self.last_errors = []
         for p in self.providers:
             breaker = self.breakers[p.name]
@@ -191,7 +199,10 @@ class ModelGateway:
                 self.last_errors.append(f"{p.name}: 熔断中（circuit open）")
                 continue
             try:
-                text, meta = p.complete(system, user)
+                if timeout is not None:
+                    text, meta = p.complete(system, user, timeout=timeout)
+                else:
+                    text, meta = p.complete(system, user)
                 breaker.record_ok()
                 self.last_meta = meta
                 return text

@@ -236,3 +236,46 @@ def test_plan_limit_trims_plan(tmp_path, monkeypatch):
     plan_events = [p for _s, t, p in events.replay("t-limit")
                    if t == "plan.created"]
     assert len(plan_events[0]["subtasks"]) == 2
+
+
+class _TimeoutRecordingHTTP(FakeHTTP):
+    def post(self, url, json=None, headers=None, **kw):
+        self.timeouts = getattr(self, "timeouts", [])
+        self.timeouts.append(kw.get("timeout"))
+        return super().post(url, json=json, headers=headers, **kw)
+
+
+def _rec_provider(script, base_timeout=180, max_retries=2):
+    http = _TimeoutRecordingHTTP(script)
+    p = OpenAICompatibleProvider("p", "https://fake/v1", "k", "m",
+                                 timeout=base_timeout, max_retries=max_retries,
+                                 backoff_base=0.0, http_client=http,
+                                 sleep_fn=lambda s: None)
+    return p, http
+
+
+def test_provider_timeout_kwarg_overrides_base_window():
+    """WRITE 阶段放宽读超时：timeout= 覆盖实例基础窗口，重试翻倍逻辑跟随。"""
+    p, http = _rec_provider([FakeResponse(500), ok_response()], max_retries=1)
+    text, meta = p.complete("s", "u", timeout=270)
+    assert text == "hello" and meta.retries == 1
+    assert http.timeouts == [270, 540]  # 首次 270，重试 2x
+
+
+def test_provider_timeout_none_uses_instance_default():
+    p, http = _rec_provider([ok_response()])
+    p.complete("s", "u")
+    assert http.timeouts == [180]
+
+
+def test_gateway_passes_timeout_to_providers():
+    """ModelGateway.complete(timeout=) 透传；None 时保持两参调用（旧 fake 兼容）。"""
+    http = _TimeoutRecordingHTTP([ok_response()])
+    p = OpenAICompatibleProvider("p", "https://fake/v1", "k", "m",
+                                 http_client=http, sleep_fn=lambda s: None)
+    gw = ModelGateway([p])
+    gw.complete("s", "u", timeout=270)
+    assert http.timeouts == [270]
+    http.script.append(ok_response())
+    gw.complete("s", "u")  # 无 timeout → 两参调用
+    assert http.timeouts == [270, 180]

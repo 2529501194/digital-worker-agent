@@ -20,6 +20,14 @@ Web：
         mcp：强制 You.com 免费 MCP（api.you.com/mcp?profile=free，无需 key，IP 限流）
     RE_EMP_FETCH_TTL_SECONDS    抓取缓存 TTL（默认 6h）
 
+Agent 运行时：
+    RE_EMP_AGENT_MAX_STEPS      每个子任务的步数上限（默认 20；旧硬编码 12，
+                                正常研究模式 search→fetch×3→write 就要 ~12 步）
+    RE_EMP_WRITE_EVIDENCE_CHARS  WRITE 阶段每篇证据工件注入的字符数（默认 4000；
+                                旧硬编码 400 会把报告质量卡死在摘要级）
+    RE_EMP_LLM_WRITE_TIMEOUT    WRITE 阶段读超时（默认 270s = 基础 180s × 1.5；
+                                长报告一次性生成 8k+ token 常需 150s+，贴线易失败）
+
 存储：
     storage/  下 events.db / artifacts/ / reports/ / fetch_cache/
 """
@@ -55,6 +63,10 @@ class AppConfig:
     you_mcp_enabled: bool = True    # 免费 MCP 搜索（无需 key，IP 限流）
     fetch_ttl_seconds: int = 6 * 3600
     fetch_cache_dir: str | Path | None = None
+    # Agent 运行时（旧值硬编码在 orchestrator/agent_loop，现收敛到此处）
+    agent_max_steps: int = 20          # 每子任务步数上限（旧 12 → 全部撞顶降级收尾）
+    write_evidence_chars: int = 4000   # WRITE 每篇证据注入字符数（旧 400 → 摘要级质量）
+    llm_write_timeout: float = 270.0   # WRITE 读超时 = 基础 180s × 1.5
 
     @classmethod
     def from_env(cls) -> "AppConfig":
@@ -68,6 +80,12 @@ class AppConfig:
         cfg.fetch_ttl_seconds = int(os.environ.get("RE_EMP_FETCH_TTL_SECONDS",
                                                    6 * 3600))
         cfg.fetch_cache_dir = os.environ.get("RE_EMP_FETCH_CACHE_DIR") or None
+        cfg.agent_max_steps = max(1, int(os.environ.get(
+            "RE_EMP_AGENT_MAX_STEPS", "20")))
+        cfg.write_evidence_chars = max(
+            200, int(os.environ.get("RE_EMP_WRITE_EVIDENCE_CHARS", "4000")))
+        cfg.llm_write_timeout = float(os.environ.get("RE_EMP_LLM_WRITE_TIMEOUT",
+                                                     "270"))
 
         primary_key = os.environ.get("RE_EMP_LLM_API_KEY") or os.environ.get(
             "OPENAI_API_KEY")

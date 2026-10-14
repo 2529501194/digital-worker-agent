@@ -62,15 +62,18 @@ def _build_env(storage: Path, limit_subtasks: int | None,
     if verbose:
         print(f"[web] 当前后端: {web.name}")
     tools = ToolRouter(web, artifacts, RESEARCHER_WHITELIST)
-    return events, artifacts, tools, llm, limit_subtasks
+    return events, artifacts, tools, llm, limit_subtasks, cfg
 
 
 def _run(task_id: str, prompt: str, storage: Path, limit_subtasks: int | None) -> None:
-    events, artifacts, tools, llm, limit = _build_env(storage, limit_subtasks)
+    events, artifacts, tools, llm, limit, cfg = _build_env(storage, limit_subtasks)
     orch = Orchestrator(
         task_id=task_id, task_prompt=prompt, llm=llm, tools=tools,
         events=events, artifacts=artifacts, budget=Budget(),
-        report_dir=storage / "reports", plan_limit=limit)
+        report_dir=storage / "reports", plan_limit=limit,
+        agent_max_steps=cfg.agent_max_steps,
+        write_evidence_chars=cfg.write_evidence_chars,
+        write_timeout=cfg.llm_write_timeout)
     t0 = time.time()
     outcome = orch.run()
     print(f"[task {task_id}] status={outcome.status} "
@@ -96,7 +99,7 @@ def cmd_resume(a: argparse.Namespace) -> None:
     """恢复失败/中断任务：有检查点断点续跑；无检查点（PLAN 阶段崩溃等）
     则从事件流取回 prompt 整体重跑（编排器见无检查点会自动重新生成计划）。"""
     storage = Path(a.storage)
-    events, artifacts, tools, llm, _limit = _build_env(storage, None, verbose=False)
+    events, artifacts, tools, llm, _limit, _cfg = _build_env(storage, None, verbose=False)
     prompt = None
     for _s, t, p in events.replay(a.task_id):
         if t == "task.created":

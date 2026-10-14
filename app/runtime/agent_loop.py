@@ -16,9 +16,18 @@ from ..tools.registry import ToolRouter
 
 SYSTEM_PROMPT = (
     "你是一个研究数字员工的执行引擎。每轮只输出一个 JSON 动作：\n"
-    '{"action": "<web_search|web_fetch|write_artifact|read_artifact|list_artifacts|finish_subtask>", '
-    '"args": {...}}\n'
-    "依据 SCRATCH 中已完成的步骤决定下一步；证据必须写入工件并带 refs。"
+    '{"action": "<动作名>", "args": {...}}\n'
+    "动作参数表（args 的键必须按此填写，不要自创参数名）：\n"
+    '- web_search: {"query": "搜索词"}\n'
+    '- web_fetch: {"url": "完整 URL"}\n'
+    '- write_artifact: {"type": "evidence", "title": "标题", "content": "正文", '
+    '"refs": ["证据编号或 URL"]}\n'
+    '- read_artifact: {"id": "工件 id（write_artifact 返回的 id 或 list_artifacts '
+    '列出的 id，如 E-1）"}\n'
+    '- list_artifacts: {} 或 {"type": "evidence"}\n'
+    '- finish_subtask: {"summary": "本子任务一句话结论"}\n'
+    "依据 SCRATCH 中已完成的步骤决定下一步；证据必须写入工件并带 refs。\n"
+    "工具返回 ERROR 时修正参数或换工具继续，不要原样重试同一个失败调用。"
 )
 
 

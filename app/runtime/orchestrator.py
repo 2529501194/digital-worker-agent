@@ -78,7 +78,10 @@ class Orchestrator:
                  llm: ModelProvider, tools: ToolRouter, events: EventStore,
                  artifacts: ArtifactStore, budget: Budget,
                  report_dir: str | Path,
-                 plan_limit: int | None = None):
+                 plan_limit: int | None = None,
+                 agent_max_steps: int = 12,
+                 write_evidence_chars: int = 400,
+                 write_timeout: float | None = None):
         self.task_id = task_id
         self.task = task_prompt
         self.llm = llm
@@ -88,13 +91,36 @@ class Orchestrator:
         self.budget = budget
         self.report_dir = Path(report_dir)
         self.plan_limit = plan_limit
-        self.loop = AgentLoop(llm, tools, events, budget)
+        # agent_max_steps：每子任务步数上限（生产链路由 AppConfig.agent_max_steps 注入，
+        # 默认 20——旧硬编码 12 时正常研究模式会全部撞顶降级收尾）
+        self.loop = AgentLoop(llm, tools, events, budget,
+                              max_steps=agent_max_steps)
+        # write_evidence_chars：WRITE 阶段每篇证据工件注入的字符数（默认 4000；
+        # 旧 400 把报告质量卡死在摘要级，8k token 报告只能靠模型先验知识补）
+        self.write_evidence_chars = write_evidence_chars
+        # write_timeout：WRITE 长生成读超时窗口（默认 270s = 基础 180s × 1.5）
+        self.write_timeout = write_timeout
 
-    def _llm_call(self, stage: str, system: str, user: str) -> str:
-        """PLAN/WRITE 阶段的 LLM 调用：统一记录事件（含 token/延迟）并消耗预算。"""
+    def _llm_call(self, stage: str, system: str, user: str,
+                  timeout: float | None = None) -> str:
+        """PLAN/WRITE 阶段的 LLM 调用：统一记录事件（含 token/延迟）并消耗预算。
+
+        timeout：本次调用读超时基础窗口（仅长生成阶段传入；None 时用 provider 默认）。
+        """
         if not self.budget.can_call_llm():
             raise BudgetExhausted("LLM 预算耗尽，无法继续")
-        raw = self.llm.complete(system, user)
+        if timeout is not None:
+            try:
+                raw = self.llm.complete(system, user, timeout=timeout)
+            except TypeError as e:
+                # 旧式两参 provider（自定义 fake/旧代码）不支持 timeout 参数：
+                # 回退默认窗口，不静默吞掉其他 TypeError
+                if "timeout" in str(e):
+                    raw = self.llm.complete(system, user)
+                else:
+                    raise
+        else:
+            raw = self.llm.complete(system, user)
         self.budget.consume_llm()
         meta = getattr(self.llm, "last_meta", None)
         payload = {"stage": stage, "model": meta.model if meta else self.llm.name,
@@ -205,7 +231,8 @@ class Orchestrator:
         plan = self._load_plan()
         evidence = self.artifacts.full(self.task_id, type_="evidence")
         ctx = build_context("WRITE", self.task, plan=plan,
-                            artifacts=evidence, content_chars=400)
+                            artifacts=evidence,
+                            content_chars=self.write_evidence_chars)
         allowed = sorted(self._known_urls(evidence))
         if allowed:
             ctx += ("\nALLOWED_URLS（参考文献只能逐字使用以下 URL，"
@@ -214,7 +241,8 @@ class Orchestrator:
         dims = self._plan_dimensions()
         dims_line = ("、".join(dims) if dims
                      else "计划未指定时，自行选择最贴合研究主题的 2-3 个维度")
-        raw = self._llm_call("WRITE", WRITE_PROMPT.format(dims=dims_line), ctx)
+        raw = self._llm_call("WRITE", WRITE_PROMPT.format(dims=dims_line), ctx,
+                             timeout=self.write_timeout)
         raw = self._verify_citations(raw, evidence)
 
         self.report_dir.mkdir(parents=True, exist_ok=True)

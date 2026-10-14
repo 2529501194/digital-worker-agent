@@ -22,6 +22,10 @@ set RE_EMP_LLM_FALLBACK_MODEL=...
 :: 慢模型（如 GLM-5.x，单次生成 30-50s）需留足读超时（默认 180s；
    读超时后重试窗口自动翻倍；仍失败会提示调大该值）：
 set RE_EMP_LLM_TIMEOUT=300
+:: Agent 运行时参数（时间线复盘 t-eb3dbd0f 后从硬编码收敛到 env，均有下限保护）：
+set RE_EMP_AGENT_MAX_STEPS=20        :: 子任务执行步数上限（默认 20；旧硬编码 12 时正常研究模式撞顶）
+set RE_EMP_WRITE_EVIDENCE_CHARS=4000 :: WRITE 阶段注入的证据字符数/篇（默认 4000；旧硬编码 400 把报告质量卡在摘要级）
+set RE_EMP_LLM_WRITE_TIMEOUT=270     :: WRITE 阶段读超时（默认 270 = 基础 180s × 1.5；长报告生成贴线）
 
 # 真实搜索（四种方式，有 key 时按优先级自动选择：LangSearch > Brave > SerpApi）：
 # 1) LangSearch 免费 Web Search API（set LANGSEARCH_API_KEY=*** key 在
@@ -74,17 +78,19 @@ app/config.py                 env 配置 → 组件装配（无 key 降级 mock�
 app/cli.py                    run / resume / timeline
 ```
 
-## 测试（85 项 Python + 16 项前端 DOM，全离线可跑）
+## 测试（100 项 Python + 16 项前端 DOM，全离线可跑）
 
 ```bash
 pytest tests/ -q
 ```
 
-- `test_agent_loop.py` — 解析失败恢复、工具错误观察、步数/预算护栏
+- `test_agent_loop.py` — 解析失败恢复、工具错误观察、步数/预算护栏、SYSTEM_PROMPT 工具参数表完整性（防模型盲猜参数名）
+- `test_tools.py` — read_artifact 空 id 明确报错 / 参数别名（path、artifact_id）/ 未知 id 时列出可用工件（时间线复盘 t-eb3dbd0f 回归）
+- `test_config.py` — Agent 运行时参数默认值 / env 覆盖 / 下限保护（agent_max_steps、write_evidence_chars、llm_write_timeout）
 - `test_actions.py` — JSON 提取健壮性：括号平衡取第一个完整对象（多 JSON / 后随杂文 / 字符串内花括号 / 转义），回归贪婪正则 `\\{.*\\}` 跨对象过度匹配缺陷（PLAN 提取共用同一实现）
-- `test_orchestrator.py` — 端到端研究任务、幂等重跑、预算收尾
+- `test_orchestrator.py` — 端到端研究任务、幂等重跑、预算收尾、max_steps 透传、WRITE 证据截断字符数、WRITE 读超时透传至 provider（旧式两参 LLM 回退兼容）
 - `test_recovery.py` — kill 模拟断点续跑、外部调用不重复
-- `test_llm_gateway.py` — 重试/退避、401 不重试、降级链、熔断生命周期、读超时窗口翻倍救慢模型、token 预算、plan_limit
+- `test_llm_gateway.py` — 重试/退避、401 不重试、降级链、熔断生命周期、读超时窗口翻倍救慢模型、`timeout=` 覆盖窗口并跟随重试翻倍、token 预算、plan_limit
 - `test_web_real.py` — 本地 HTTP server 验证真实抓取链路（HTML→MD、404、磁盘缓存防重复抓取、断网优雅降级）、LangSearch/Brave/SerpApi 响应解析与 build_web 优先级
 - `test_model_registry.py` — LLM 降级链/搜索 key 增删改/重排序、models.json 分节持久化、损坏回退
 - `test_web_server.py` — `/api/models*` 全周期（增删改/重排/web key/持久化重载）+ 注入模式只读 409

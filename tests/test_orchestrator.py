@@ -201,3 +201,121 @@ def test_plan_json_with_trailing_extra_json(tmp_path):
     import pytest
     with pytest.raises(ValueError, match="无有效 JSON"):
         _extract_json("没有 JSON 的输出")
+
+
+# ---- 时间线复盘 t-eb3dbd0f 的四项修复回归 ----
+
+class _RecordingLLM:
+    """委托 MockResearchLLM，但记录每次 complete 的上下文。"""
+
+    name = "rec"
+
+    def __init__(self):
+        self._inner = MockResearchLLM()
+        self.ctxs = []
+        self.last_meta = None
+
+    def complete(self, system, user, timeout=None):
+        self.ctxs.append(user)
+        text = self._inner.complete(system, user)
+        self.last_meta = self._inner.last_meta
+        return text
+
+
+def _make_orch_with(tmp_path, task_id, llm, **kw):
+    storage = tmp_path / "storage"
+    events = EventStore(storage / "events.db")
+    artifacts = ArtifactStore(storage / "artifacts")
+    orch = Orchestrator(task_id, PROMPT, llm,
+                        ToolRouter(MockWebBackend(), artifacts), events,
+                        artifacts, Budget(), storage / "reports", **kw)
+    return orch, artifacts
+
+
+def test_agent_max_steps_wiring(tmp_path):
+    """agent_max_steps 透传给 AgentLoop（生产链路由 AppConfig 注入默认 20）。"""
+    orch, artifacts = _make_orch_with(tmp_path, "t-ms", MockResearchLLM())
+    assert orch.loop.max_steps == 12  # orchestrator 层默认值
+    orch2, _ = _make_orch_with(tmp_path, "t-ms2", MockResearchLLM(),
+                               agent_max_steps=20)
+    assert orch2.loop.max_steps == 20
+
+
+def test_write_evidence_chars_controls_truncation(tmp_path):
+    """WRITE 阶段证据注入字符数：400 截断、4000 全量（旧硬编码 400 卡报告质量）。"""
+    long_text = "X" * 1000
+
+    def run(sub, chars):
+        storage = tmp_path / sub
+        events = EventStore(storage / "events.db")
+        artifacts = ArtifactStore(storage / "artifacts")
+        artifacts.write("t-ev", "evidence", "long", long_text, ["https://x"])
+        llm = _RecordingLLM()
+        orch = Orchestrator("t-ev", PROMPT, llm,
+                            ToolRouter(MockWebBackend(), artifacts), events,
+                            artifacts, Budget(), storage / "reports",
+                            write_evidence_chars=chars)
+        assert orch.run().status == "done"
+        write_ctx = [c for c in llm.ctxs if "STAGE: WRITE" in c]
+        assert len(write_ctx) == 1
+        return write_ctx[0]
+
+    assert "...[截断]" in run("a", 400)
+    assert long_text in run("b", 4000)  # 4000 字符窗口装得下 1000 字全文
+
+
+class _TwoArgLLM:
+    """旧式两参 LLM（自定义 fake / 用户代码）：不接受 timeout kwarg。"""
+
+    name = "two-arg"
+
+    def __init__(self):
+        self._inner = MockResearchLLM()
+        self.last_meta = None
+
+    def complete(self, system, user):
+        text = self._inner.complete(system, user)
+        self.last_meta = self._inner.last_meta
+        return text
+
+
+def test_write_timeout_falls_back_for_two_arg_llm(tmp_path):
+    """write_timeout 已配置但 LLM 不支持该参数 → 回退默认窗口而非崩溃。"""
+    orch, _ = _make_orch_with(tmp_path, "t-2a", _TwoArgLLM(), write_timeout=270)
+    assert orch.run().status == "done"
+
+
+class _TimeoutProbe:
+    """真实 provider 形状（返回 (text, meta)）：记录收到的 timeout。"""
+
+    name = "probe"
+
+    def __init__(self):
+        self._inner = MockResearchLLM()
+        self.calls = []
+        self.last_meta = None
+
+    def complete(self, system, user, timeout=None):
+        self.calls.append((user.splitlines()[0] if user else "", timeout))
+        text, meta = self._inner.complete(system, user), self._inner.last_meta
+        self.last_meta = meta
+        return text, meta
+
+
+def test_write_timeout_passed_to_provider(tmp_path):
+    """WRITE 调用的读超时窗口透传到 provider；PLAN/EXECUTE 不受影响。"""
+    from app.runtime.llm import ModelGateway
+    probe = _TimeoutProbe()
+    gw = ModelGateway([probe])
+    storage = tmp_path / "storage"
+    events = EventStore(storage / "events.db")
+    artifacts = ArtifactStore(storage / "artifacts")
+    orch = Orchestrator("t-to", PROMPT, gw,
+                        ToolRouter(MockWebBackend(), artifacts), events,
+                        artifacts, Budget(), storage / "reports",
+                        write_timeout=270)
+    assert orch.run().status == "done"
+    write_calls = [(s, t) for s, t in probe.calls if t is not None]
+    assert [t for _, t in write_calls] == [270]  # 仅 WRITE 一次
+    non_write = [t for s, t in probe.calls if t is None]
+    assert len(non_write) >= 2  # PLAN + EXECUTE 若干次，均用 provider 默认

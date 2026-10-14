@@ -55,6 +55,7 @@ class TaskManager:
         self.events = EventStore(self.storage / "events.db")
         self.artifacts = ArtifactStore(self.storage / "artifacts")
         cfg = AppConfig.from_env()
+        self._cfg = cfg  # Agent 运行时参数（max_steps/证据字符数/WRITE 超时）
         # 模型配置注册表：两者均未注入（Web 服务模式）时启用运行时增删改/
         # 重排序 + 持久化（storage/models.json，重启后仍生效）。
         # 注入 llm/web（测试/演示模式）时注册表关闭，/api/models 只读。
@@ -122,11 +123,15 @@ class TaskManager:
                 raise TaskRunningError(task_id)
 
             def run() -> None:
+                cfg = self._cfg
                 orch = Orchestrator(
                     task_id=task_id, task_prompt=prompt, llm=self.llm,
                     tools=self.tools, events=self.events,
                     artifacts=self.artifacts, budget=Budget(),
-                    report_dir=self.storage / "reports", plan_limit=limit_subtasks)
+                    report_dir=self.storage / "reports", plan_limit=limit_subtasks,
+                    agent_max_steps=cfg.agent_max_steps,
+                    write_evidence_chars=cfg.write_evidence_chars,
+                    write_timeout=cfg.llm_write_timeout)
                 try:
                     orch.run()
                 except Exception as e:  # 未捕获异常也入事件流，前端可见

@@ -18,7 +18,10 @@ from .llm import CallMeta
 class ModelProvider(Protocol):
     name: str
 
-    def complete(self, system: str, user: str) -> str: ...
+    def complete(self, system: str, user: str,
+                 timeout: float | None = None) -> str: ...
+    # 注：timeout 仅供 WRITE 等长生成阶段放宽读超时窗口；
+    # 简单 fake（两参 complete）仍满足协议（orchestrator 仅在 timeout 非 None 时透传）
 
 
 # ---------------------------------------------------------------- Mock LLM
@@ -50,7 +53,8 @@ class MockResearchLLM:
 
     name = "mock-researcher-v0"
 
-    def complete(self, system: str, user: str) -> str:
+    def complete(self, system: str, user: str,
+                 timeout: float | None = None) -> str:  # mock 忽略 timeout
         stage = _line(user, "STAGE")
         if stage == "PLAN":
             return self._plan(user)
@@ -193,7 +197,8 @@ class ScriptedLLM:
         self.calls: list[str] = []
         self.last_meta: CallMeta | None = None
 
-    def complete(self, system: str, user: str) -> str:
+    def complete(self, system: str, user: str,
+                 timeout: float | None = None) -> str:  # 脚本 fake 忽略 timeout
         self.calls.append(user)
         if not self.responses:
             raise RuntimeError("ScriptedLLM 脚本耗尽")

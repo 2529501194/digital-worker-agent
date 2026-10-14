@@ -93,3 +93,16 @@ def test_budget_exhaustion(tmp_path):
     assert r.exhausted and "预算" in r.summary
     types = [t for _s, t, _p in events.replay("t1")]
     assert "subtask.paused" in types
+
+
+def test_system_prompt_documents_tool_args():
+    """回归：SYSTEM_PROMPT 必须给出工具参数表。
+
+    时间线复盘 t-eb3dbd0f：参数表缺失 → 模型盲猜 read_artifact 的参数名
+    （三次空 id 调用，浪费 5/36 步）。参数表 + "不要原样重试" 规则防复发。
+    """
+    from app.runtime.agent_loop import SYSTEM_PROMPT
+    assert "参数表" in SYSTEM_PROMPT
+    for key in ('"query"', '"url"', '"content"', '"refs"', '"id"', '"summary"'):
+        assert key in SYSTEM_PROMPT, f"参数表缺少 {key}"
+    assert "不要原样重试" in SYSTEM_PROMPT
